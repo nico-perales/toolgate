@@ -6,5 +6,7 @@
 //! desde la última vez.
 
 mod error;
+mod pkg;
 
 pub use error::Error;
+pub use pkg::{Package, SourceFile, read_tarball};
