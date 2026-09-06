@@ -7,12 +7,14 @@
 
 mod capabilities;
 mod error;
+mod launch;
 mod pkg;
 mod poison;
 mod tool;
 
 pub use capabilities::{Capability, Evidence, capabilities, scan};
 pub use error::Error;
+pub use launch::Contained;
 pub use pkg::{Package, SourceFile, read_tarball};
 pub use poison::{Severity, Signal, inspect};
 pub use tool::Tool;
