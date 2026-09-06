@@ -8,6 +8,7 @@
 mod capabilities;
 mod error;
 mod launch;
+mod lock;
 mod mcp;
 mod pkg;
 mod poison;
@@ -16,6 +17,7 @@ mod tool;
 pub use capabilities::{Capability, Evidence, capabilities, scan};
 pub use error::Error;
 pub use launch::Contained;
+pub use lock::{Change, Lock, Pinned, PinnedTool, canonical, diff, hash_tools, pin};
 pub use mcp::list_tools;
 pub use pkg::{Package, SourceFile, read_tarball};
 pub use poison::{Severity, Signal, inspect};
