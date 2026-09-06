@@ -32,6 +32,10 @@ oxc_ast_visit = "0.75.0"
 clap = { version = "4", features = ["derive"], optional = true }
 anyhow = { version = "1", optional = true }
 
+[[bin]]
+name = "toolgate"
+required-features = ["cli"]
+
 [lib]
 name = "toolgate"
 
