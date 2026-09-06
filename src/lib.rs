@@ -5,8 +5,10 @@
 //! hacer ese código, qué texto va a recibir el modelo, y si algo ha cambiado
 //! desde la última vez.
 
+mod capabilities;
 mod error;
 mod pkg;
 
+pub use capabilities::{Capability, Evidence, capabilities, scan};
 pub use error::Error;
 pub use pkg::{Package, SourceFile, read_tarball};
