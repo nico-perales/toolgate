@@ -14,6 +14,17 @@ use crate::error::Error;
 // A malicious server can flood stdout, so we cut it off.
 const MAX_LINES: usize = 10_000;
 
+// The only variables the child is allowed to see. Everything else is dropped:
+// an MCP server has no business reading your tokens.
+//
+// Windows needs more than PATH. `SystemRoot` is where Win32 finds its own DLLs,
+// and without it the Winsock and crypto initialisers fail, so the process dies
+// on startup instead of reporting anything. None of these leak user data.
+#[cfg(windows)]
+const ALLOWED_ENV: &[&str] = &["PATH", "SYSTEMROOT", "WINDIR"];
+#[cfg(not(windows))]
+const ALLOWED_ENV: &[&str] = &["PATH"];
+
 pub struct Contained {
     child: Child,
     stdin: ChildStdin,
@@ -29,12 +40,17 @@ impl Contained {
             source: e,
         })?;
 
-        let mut child = Command::new(command)
-            .args(args)
-            // Minimal environment: it inherits neither your variables nor your
-            // credentials. Only PATH, so the process can find its binaries.
-            .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
+        // Minimal environment: it inherits neither your variables nor your
+        // credentials, only what the platform needs to start a process at all.
+        let mut builder = Command::new(command);
+        builder.args(args).env_clear();
+        for name in ALLOWED_ENV {
+            if let Ok(value) = std::env::var(name) {
+                builder.env(name, value);
+            }
+        }
+
+        let mut child = builder
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -106,7 +122,7 @@ impl Drop for Contained {
 
 #[cfg(test)]
 mod tests {
-    use super::Contained;
+    use super::{ALLOWED_ENV, Contained};
     use std::time::Duration;
 
     #[test]
@@ -135,21 +151,35 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_is_minimal() {
-        // The child must not inherit the parent's environment: only PATH, so it
-        // can find its binaries. `set_var` is no use here because the crate
-        // forbids `unsafe`, so we measure the resulting environment instead.
-        let script = "process.stdout.write(Object.keys(process.env).length + \":\" + String(!!process.env.PATH));";
+    fn the_child_sees_only_the_allowed_variables() {
+        // Asserting the actual property beats counting: an earlier version of
+        // this test checked `count < 5`, which says nothing about *which*
+        // variables got through and breaks the moment the allowlist changes.
+        let script = "process.stdout.write(Object.keys(process.env).sort().join(','));";
         let Ok(mut server) = Contained::spawn("node", &["-e".to_owned(), script.to_owned()]) else {
-            return;
+            return; // without Node installed, skip
         };
-        let line = server.recv_line(Duration::from_secs(10)).unwrap();
-        let (count, has_path) = line.trim().split_once(char::from(58)).unwrap();
-        assert_eq!(has_path, "true", "the child needs PATH");
-        let count: usize = count.parse().unwrap();
+        let line = server
+            .recv_line(Duration::from_secs(10))
+            .expect("the child must survive a cleared environment");
+
+        let names: Vec<&str> = line.trim().split(',').filter(|n| !n.is_empty()).collect();
+        let leaked: Vec<&&str> = names
+            .iter()
+            .filter(|name| !ALLOWED_ENV.iter().any(|a| a.eq_ignore_ascii_case(name)))
+            .collect();
+        assert!(leaked.is_empty(), "the child inherited {leaked:?}");
         assert!(
-            count < 5,
-            "the environment should be minimal, it has {count} variables"
+            names.iter().any(|n| n.eq_ignore_ascii_case("PATH")),
+            "the child needs PATH to find its binaries, got {names:?}"
+        );
+        // The regression this encodes: without SystemRoot, Win32 initialisation
+        // fails and the child dies before writing a byte. Node 20 happens to
+        // tolerate it; the CI runners' Node does not.
+        #[cfg(windows)]
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("SYSTEMROOT")),
+            "on Windows the child needs SystemRoot, got {names:?}"
         );
     }
 }
