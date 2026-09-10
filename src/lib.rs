@@ -20,9 +20,11 @@ pub use audit::{Audit, audit};
 pub use capabilities::{Capability, Evidence, capabilities, scan};
 pub use error::Error;
 pub use launch::Contained;
-pub use lock::{Change, Lock, Pinned, PinnedTool, canonical, diff, hash_tools, pin};
+pub use lock::{
+    Change, LOCK_VERSION, Lock, Pinned, PinnedTool, canonical, diff, hash_tools, pin, tarball_hash,
+};
 pub use mcp::list_tools;
 pub use pkg::{Package, SourceFile, read_tarball};
 pub use poison::{Severity, Signal, inspect};
-pub use report::render;
+pub use report::{render, render_changes};
 pub use tool::Tool;

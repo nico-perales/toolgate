@@ -4,7 +4,7 @@
 //! enumerarlo puede ejecutar su código, así que el análisis estático va primero
 //! y tiene poder de veto. Sin esto, el orden "estático primero" sería decorativo.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capabilities::{self, Capability, Evidence};
 use crate::error::Error;
@@ -27,6 +27,22 @@ pub struct Audit {
     pub signals: Vec<Signal>,
     /// Presente si el análisis estático prohibió arrancar el servidor.
     pub vetoed: Option<String>,
+}
+
+impl Audit {
+    /// Nombres únicos y ordenados de las capacidades detectadas.
+    ///
+    /// Es lo que se fija y lo que se compara: el orden y las repeticiones del
+    /// inventario dependen de en qué fichero apareció cada cosa, y eso cambia
+    /// entre publicaciones sin que cambie nada relevante.
+    pub fn capability_names(&self) -> Vec<String> {
+        let unique: BTreeSet<String> = self
+            .capabilities
+            .iter()
+            .map(|e| format!("{:?}", e.capability))
+            .collect();
+        unique.into_iter().collect()
+    }
 }
 
 /// Motivos por los que el análisis estático prohíbe arrancar el servidor.

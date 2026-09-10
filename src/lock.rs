@@ -71,6 +71,18 @@ pub fn hash_tools(tools: &[Tool]) -> String {
     sha256_hex(hashes.concat().as_bytes())
 }
 
+/// Versión del formato del fichero de bloqueo.
+pub const LOCK_VERSION: u32 = 1;
+
+/// Huella del tarball tal cual lo publica npm.
+///
+/// Se hashea el `.tgz`, no el directorio instalado: lo instalado varía entre
+/// máquinas (artefactos de build, opcionales por plataforma) y daría falsas
+/// alarmas.
+pub fn tarball_hash(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinnedTool {
     pub name: String,
@@ -97,6 +109,19 @@ pub struct Lock {
     /// cuando hay config global y de proyecto.
     pub config: String,
     pub servers: BTreeMap<String, Pinned>,
+}
+
+impl Lock {
+    /// Un bloqueo vacío. `config` es una etiqueta libre que dice a qué
+    /// configuración corresponde, para no comparar peras con manzanas cuando
+    /// hay una global y otra por proyecto.
+    pub fn new(config: &str) -> Self {
+        Self {
+            version: LOCK_VERSION,
+            config: config.to_owned(),
+            servers: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,7 +211,7 @@ pub fn diff(old: &Pinned, new: &Pinned) -> Vec<Change> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Change, canonical, diff, hash_tools, pin};
+    use super::{Change, LOCK_VERSION, Lock, canonical, diff, hash_tools, pin, tarball_hash};
     use crate::tool::Tool;
     use serde_json::json;
 
@@ -284,5 +309,32 @@ mod tests {
             &[tool("a", "x")],
         );
         assert!(diff(&p, &p).is_empty());
+    }
+
+    #[test]
+    fn a_republished_tarball_gets_a_different_hash() {
+        // La firma exacta de un rug pull: misma versión, contenido distinto.
+        assert_ne!(tarball_hash(b"contenido a"), tarball_hash(b"contenido b"));
+        assert_eq!(tarball_hash(b"contenido a"), tarball_hash(b"contenido a"));
+    }
+
+    #[test]
+    fn a_lock_survives_a_round_trip_through_json() {
+        let mut lock = Lock::new("~/.config/mcp.json");
+        lock.servers.insert(
+            "docs".to_owned(),
+            pin(
+                "p@1.0.0",
+                "sha256:aa",
+                &["Net".to_owned()],
+                &[tool("q", "Solo lectura.")],
+            ),
+        );
+        let text = serde_json::to_string(&lock).unwrap();
+        let back: Lock = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.version, LOCK_VERSION);
+        assert_eq!(back.config, "~/.config/mcp.json");
+        // Y lo que se recupera no genera cambios falsos contra el original.
+        assert!(diff(&lock.servers["docs"], &back.servers["docs"]).is_empty());
     }
 }
