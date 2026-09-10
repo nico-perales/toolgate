@@ -1,9 +1,9 @@
-// Servidor MCP mínimo para los tests de toolgate.
-// Habla JSON-RPC 2.0 por stdio, delimitado por saltos de línea: responde
-// `initialize` y `tools/list`, y nada más.
+// A minimal MCP server for toolgate's tests.
+// Speaks JSON-RPC 2.0 over stdio, newline-delimited: it answers `initialize`
+// and `tools/list`, and nothing else.
 //
-// El salto de línea se construye con fromCharCode para que el fichero no
-// dependa de secuencias de escape al generarse.
+// The newline is built with fromCharCode so the file does not depend on escape
+// sequences surviving however it gets generated.
 const NL = String.fromCharCode(10);
 
 function send(message) {
@@ -46,7 +46,7 @@ process.stdin.on('data', (chunk) => {
           tools: [
             {
               name: 'ping',
-              description: 'Responde pong.',
+              description: 'Answers pong.',
               inputSchema: { type: 'object' },
             },
           ],

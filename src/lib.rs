@@ -1,9 +1,9 @@
-//! `toolgate`: auditoría de seguridad para servidores MCP.
+//! `toolgate`: security auditing for MCP servers.
 //!
-//! Un servidor MCP es código de terceros con acceso a tus datos que inyecta
-//! texto directamente en el contexto del modelo. `toolgate` audita qué puede
-//! hacer ese código, qué texto va a recibir el modelo, y si algo ha cambiado
-//! desde la última vez.
+//! An MCP server is third-party code with access to your data that injects text
+//! straight into a model's context. `toolgate` audits what that code can do,
+//! what text the model is going to receive, and whether any of it has changed
+//! since the last time you looked.
 
 mod audit;
 mod capabilities;

@@ -21,6 +21,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The launch and MCP tests skip themselves when Node is missing, so
+      # without this check they would pass while testing nothing.
+      - name: Node must be present
+        run: node --version
       - name: Build
         run: cargo build --all-targets --locked
       - name: Test
@@ -41,19 +45,6 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --all-targets --all-features --locked
-
-  # La auto-verificación dentro de symreach sería circular (mismo lifter en la
-  # ejecución simbólica y en la concreta). Este job ejecuta los ELF de verdad en
-  # x86-64 real: es la única verificación que valida el lifter.
-  verify-on-linux:
-    name: Verify on real Linux
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run the real binaries with the inputs symreach found
-        run: bash tests/crackmes/verify.sh
 
   audit:
     name: Security audit

@@ -1,9 +1,9 @@
-//! Render del informe en texto.
+//! Rendering the report as text.
 //!
-//! La regla que evita que la herramienta grite en casos normales: **las
-//! capacidades se presentan como información, nunca como hallazgo**. Un servidor
-//! de git tiene `Exec` legítimamente. Solo son hallazgo si aparecen en un script
-//! de instalación o si han cambiado respecto a lo fijado.
+//! The rule that stops the tool from shouting in normal cases: **capabilities
+//! are presented as information, never as a finding**. A git server has `Exec`
+//! legitimately. They are only a finding when they appear in an install script,
+//! or when they changed against a pin.
 
 use std::fmt::Write as _;
 
@@ -11,7 +11,7 @@ use crate::audit::Audit;
 use crate::lock::Change;
 use crate::poison::Severity;
 
-/// Informe legible de una auditoría.
+/// A readable report for an audit.
 pub fn render(report: &Audit) -> String {
     let mut out = String::new();
 
@@ -21,7 +21,7 @@ pub fn render(report: &Audit) -> String {
     }
     out.push('\n');
 
-    // --- capacidades: información ---
+    // --- capabilities: information ---
     let caps = report.capability_names();
     out.push('\n');
     out.push_str("Capabilities (information, not findings)\n");
@@ -31,14 +31,14 @@ pub fn render(report: &Audit) -> String {
         let _ = writeln!(out, "  {}", caps.join(", "));
     }
 
-    // --- scripts de instalación: esto sí importa ---
+    // --- install scripts: these do matter ---
     for hook in ["preinstall", "install", "postinstall"] {
         if let Some(command) = report.scripts.get(hook) {
             let _ = writeln!(out, "  ! {hook} script: {command}");
         }
     }
 
-    // --- el veto corta aquí ---
+    // --- the veto cuts things off here ---
     if let Some(reason) = &report.vetoed {
         let _ = writeln!(out, "\nServer NOT started: {reason}");
         out.push_str("Its tools were never enumerated, so nothing can be claimed\n");
@@ -46,7 +46,7 @@ pub fn render(report: &Audit) -> String {
         return out;
     }
 
-    // --- herramientas ---
+    // --- tools ---
     let _ = writeln!(out, "\nTools: {}", report.tools.len());
     let mut critical = 0usize;
     let mut warnings = 0usize;
@@ -70,8 +70,8 @@ pub fn render(report: &Audit) -> String {
     out
 }
 
-/// Una descripción en una sola línea, acotada, para poder enseñar el antes y el
-/// después sin volcar un payload de relleno entero en la terminal.
+/// A description on a single bounded line, so before/after can be shown without
+/// dumping an entire padding payload into the terminal.
 fn one_line(text: &str) -> String {
     const MAX: usize = 300;
     let collapsed: Vec<&str> = text.split_whitespace().collect();
@@ -84,10 +84,10 @@ fn one_line(text: &str) -> String {
     format!("{head}… (+{} more characters)", total - MAX)
 }
 
-/// Informe legible de un `check`: qué cambió respecto a lo fijado.
+/// A readable report for a `check`: what changed against the pin.
 ///
-/// Aquí no hay heurística. Cada línea es un hecho comprobable, así que todas
-/// son hallazgos de pleno derecho.
+/// There is no heuristic here. Every line is a checkable fact, so all of them
+/// are findings in their own right.
 pub fn render_changes(changes: &[Change]) -> String {
     let mut out = String::new();
     if changes.is_empty() {
@@ -104,9 +104,9 @@ pub fn render_changes(changes: &[Change]) -> String {
         match change {
             Change::PackageChanged { before, after } => {
                 if before == after {
-                    // Mismo nombre y misma versión, pero otro tarball. npm no
-                    // debería reescribir una versión publicada: esto es lo más
-                    // parecido a una prueba de rug pull que existe.
+                    // Same name and same version, but a different tarball. npm
+                    // should never rewrite a published version, so this is as
+                    // close to proof of a rug pull as it gets.
                     let _ = writeln!(out, "  x {before} changed content WITHOUT changing version");
                 } else {
                     let _ = writeln!(out, "  x the package changed: {before} -> {after}");
@@ -159,7 +159,7 @@ mod tests {
         let text = render(&empty(Some("postinstall script: node s.js".to_owned())));
         assert!(text.contains("Server NOT started"));
         assert!(text.contains("nothing can be claimed"));
-        // No debe hablar de herramientas si no las enumeró.
+        // It must not talk about tools it never enumerated.
         assert!(!text.contains("Tools:"));
     }
 
@@ -202,7 +202,7 @@ mod tests {
             after: padding,
         }]);
         assert!(text.contains("more characters)"));
-        // Cuatro líneas: la cabecera, el titular del cambio, el antes y el ahora.
+        // Four lines: the header, the change headline, the before and the after.
         assert_eq!(text.lines().count(), 4);
     }
 }

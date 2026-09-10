@@ -1,9 +1,9 @@
-//! Inventario de capacidades por AST.
+//! Capability inventory from the AST.
 //!
-//! Responde "qué puede hacer este código", no "qué hace". Es un inventario, no
-//! una acusación: un servidor de git tiene `Exec` legítimamente. Solo se
-//! convierte en hallazgo si cambia respecto a lo fijado o aparece en un script
-//! de instalación.
+//! It answers "what can this code do", not "what does it do". It is an
+//! inventory, not an accusation: a git server has `Exec` legitimately. It only
+//! becomes a finding when it changes against a pin, or when it shows up in an
+//! install script.
 
 use std::collections::BTreeSet;
 
@@ -24,8 +24,8 @@ pub enum Capability {
     Fs,
     Exec,
     Env,
-    /// `eval`, `new Function` o un `require` calculado: a partir de aquí el
-    /// inventario estático **ya no es completo**, y el informe debe decirlo.
+    /// `eval`, `new Function` or a computed `require`: from here on the static
+    /// inventory is **no longer complete**, and the report has to say so.
     Dynamic,
 }
 
@@ -35,7 +35,7 @@ pub struct Evidence {
     pub file: String,
 }
 
-// Módulo de Node → capacidad. Se admite el prefijo `node:`.
+// Node module -> capability. The `node:` prefix is accepted.
 fn module_capability(name: &str) -> Option<Capability> {
     let base = name.strip_prefix("node:").unwrap_or(name);
     let root = base.split('/').next().unwrap_or(base);
@@ -76,7 +76,7 @@ impl<'a> Visit<'a> for CapabilityVisitor {
                             self.caps.insert(cap);
                         }
                     }
-                    // require(variable): el inventario deja de ser completo.
+                    // require(variable): the inventory stops being complete.
                     None => {
                         self.caps.insert(Capability::Dynamic);
                     }
@@ -126,10 +126,10 @@ impl<'a> Visit<'a> for CapabilityVisitor {
     }
 }
 
-/// Capacidades de un fichero fuente.
+/// Capabilities of one source file.
 pub fn capabilities(source: &str) -> BTreeSet<Capability> {
     let allocator = Allocator::default();
-    // El superconjunto más ancho, para que entren CommonJS, ESM y TS.
+    // The widest superset, so CommonJS, ESM and TS all parse.
     let source_type = SourceType::default().with_typescript(true).with_jsx(true);
     let parsed = Parser::new(&allocator, source, source_type).parse();
 
@@ -138,7 +138,7 @@ pub fn capabilities(source: &str) -> BTreeSet<Capability> {
     visitor.caps
 }
 
-/// Capacidades de todo el paquete, con el fichero donde aparece cada una.
+/// Capabilities of the whole package, with the file each one came from.
 pub fn scan(pkg: &Package) -> Vec<Evidence> {
     let mut out = Vec::new();
     for file in &pkg.sources {
@@ -199,7 +199,7 @@ mod tests {
             caps("const f = new Function('a', 'return a');"),
             vec![Capability::Dynamic]
         );
-        // Un require calculado hace incompleto el inventario estático.
+        // A computed require makes the static inventory incomplete.
         assert_eq!(caps("require(mod);"), vec![Capability::Dynamic]);
     }
 

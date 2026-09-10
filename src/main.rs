@@ -1,4 +1,4 @@
-//! La interfaz de línea de comandos de toolgate.
+//! The toolgate command-line interface.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -100,7 +100,7 @@ fn run() -> Result<ExitCode> {
     }
 }
 
-// --- utilidades ---
+// --- helpers ---
 
 fn read_tarball_file(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading {}", path.display()))
@@ -113,7 +113,7 @@ fn split_launch(parts: &[String]) -> Result<(&str, &[String])> {
         .context("`--` must be followed by the command that starts the server")
 }
 
-/// De "@ambito/nombre@1.2.3" saca "@ambito/nombre"; de "nombre@1.2.3", "nombre".
+/// Turns "@scope/name@1.2.3" into "@scope/name", and "name@1.2.3" into "name".
 fn server_key(package: &str) -> &str {
     match package.rsplit_once('@') {
         Some((name, _)) if !name.is_empty() => name,
@@ -129,8 +129,8 @@ fn critical_signals(report: &Audit) -> Vec<&Signal> {
         .collect()
 }
 
-/// Copia sin herramientas, para comparar solo la parte estática cuando el
-/// servidor no se ha podido enumerar.
+/// A copy without tools, so only the static half is compared when the server
+/// could not be enumerated.
 fn without_tools(pinned: &Pinned) -> Pinned {
     Pinned {
         tools: Vec::new(),
@@ -166,11 +166,11 @@ fn pinned_from(report: &Audit, bytes: &[u8]) -> Pinned {
     )
 }
 
-// --- subcomandos ---
+// --- subcommands ---
 
 fn run_audit(tarball: &Path, launch: &[String]) -> Result<ExitCode> {
     let bytes = read_tarball_file(tarball)?;
-    // Vacío significa que no se pidió arrancar nada: solo análisis estático.
+    // Empty means no launch was requested: static analysis only.
     let launch_command = if launch.is_empty() {
         None
     } else {
@@ -180,7 +180,7 @@ fn run_audit(tarball: &Path, launch: &[String]) -> Result<ExitCode> {
     let report = audit(&bytes, launch_command)?;
     print!("{}", render(&report));
 
-    // Un veto también cuenta: no se puede afirmar que sea seguro.
+    // A veto counts too: there is no basis for calling it safe.
     if !critical_signals(&report).is_empty() || report.vetoed.is_some() {
         return Ok(ExitCode::from(1));
     }
@@ -267,8 +267,8 @@ fn run_check(
     let new = pinned_from(&report, &bytes);
 
     if let Some(reason) = &report.vetoed {
-        // Comparar herramientas aquí diría que han desaparecido todas, y sería
-        // mentira: no se han mirado.
+        // Diffing tools here would claim they all vanished, and that would
+        // be a lie: they were never looked at.
         let static_changes = diff(&without_tools(old), &without_tools(&new));
         print!("{}", render_changes(&static_changes));
         println!("\nServer NOT started: {reason}");
@@ -304,24 +304,31 @@ mod tests {
     use clap::Parser;
 
     fn parse(args: &[&str]) -> Cli {
-        Cli::try_parse_from(args).expect("debe parsear")
+        Cli::try_parse_from(args).expect("should parse")
     }
 
     #[test]
     fn a_flag_after_the_command_separator_is_not_swallowed() {
-        // Regresión: con `--launch` de aridad variable, un `--lock` posterior
-        // acababa como argumento del servidor y `check` miraba el bloqueo por
-        // defecto informando "sin cambios". Un falso "todo bien" es el peor
-        // fallo posible en una herramienta de seguridad.
+        // Regression: with a variadic `--launch`, a later `--lock` ended up as
+        // an argument to the server, so `check` read the default lock file and
+        // reported "no changes". A false all-clear is the worst possible
+        // failure in a security tool.
         let cli = parse(&[
-            "toolgate", "check", "p.tgz", "--lock", "mi.lock", "--", "node", "s.js",
+            "toolgate",
+            "check",
+            "p.tgz",
+            "--lock",
+            "mine.lock",
+            "--",
+            "node",
+            "s.js",
         ]);
         match cli.command {
             Command::Check { lock, launch, .. } => {
-                assert_eq!(lock.to_str().unwrap(), "mi.lock");
+                assert_eq!(lock.to_str().unwrap(), "mine.lock");
                 assert_eq!(launch, ["node", "s.js"]);
             }
-            other => panic!("se esperaba Check, salió {other:?}"),
+            other => panic!("expected Check, got {other:?}"),
         }
     }
 
@@ -330,13 +337,13 @@ mod tests {
         let cli = parse(&["toolgate", "pin", "p.tgz", "--", "npx", "-y", "@acme/mcp"]);
         match cli.command {
             Command::Pin { launch, .. } => assert_eq!(launch, ["npx", "-y", "@acme/mcp"]),
-            other => panic!("se esperaba Pin, salió {other:?}"),
+            other => panic!("expected Pin, got {other:?}"),
         }
     }
 
     #[test]
     fn pin_and_check_refuse_to_run_without_a_launch_command() {
-        // Fijar sin enumerar guardaría cero herramientas.
+        // Pinning without enumerating would store zero tools.
         assert!(Cli::try_parse_from(["toolgate", "pin", "p.tgz"]).is_err());
         assert!(Cli::try_parse_from(["toolgate", "check", "p.tgz"]).is_err());
     }
@@ -346,7 +353,7 @@ mod tests {
         let cli = parse(&["toolgate", "audit", "p.tgz"]);
         match cli.command {
             Command::Audit { launch, .. } => assert!(launch.is_empty()),
-            other => panic!("se esperaba Audit, salió {other:?}"),
+            other => panic!("expected Audit, got {other:?}"),
         }
     }
 
@@ -354,7 +361,7 @@ mod tests {
     fn the_lock_key_drops_the_version_but_keeps_the_scope() {
         assert_eq!(server_key("@acme/docs-mcp@1.4.0"), "@acme/docs-mcp");
         assert_eq!(server_key("docs-mcp@1.4.0"), "docs-mcp");
-        // Sin versión no hay nada que quitar.
+        // With no version there is nothing to strip.
         assert_eq!(server_key("@acme/docs-mcp"), "@acme/docs-mcp");
     }
 }

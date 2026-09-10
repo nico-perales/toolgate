@@ -1,8 +1,8 @@
-//! Lectura de un tarball de npm **sin instalarlo**.
+//! Reading an npm tarball **without installing it**.
 //!
-//! Es lo que permite el orden correcto: analizar antes de que se ejecute ningún
-//! script de instalación. Las entradas de un `.tgz` de npm van todas bajo el
-//! prefijo `package/`.
+//! This is what makes the right order possible: analyse before any install
+//! script gets to run. Every entry in an npm `.tgz` lives under the `package/`
+//! prefix.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -12,9 +12,9 @@ use serde::Deserialize;
 
 use crate::error::Error;
 
-// Un fichero con líneas larguísimas es, en la práctica, código minificado.
+// A file with very long lines is, in practice, minified code.
 const MINIFIED_LINE: usize = 500;
-// Techo por fichero: no se analizan blobs enormes.
+// Per-file ceiling: huge blobs are not analysed.
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -29,8 +29,8 @@ pub struct Package {
     pub version: String,
     pub scripts: BTreeMap<String, String>,
     pub sources: Vec<SourceFile>,
-    /// El paquete se publica empaquetado/minificado: el inventario de
-    /// capacidades no podrá atribuir con precisión, y el informe debe decirlo.
+    /// The package ships bundled/minified: the capability inventory will not be
+    /// able to attribute precisely, and the report has to say so.
     pub bundled: bool,
 }
 
@@ -49,12 +49,12 @@ fn is_source(path: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
-// Quita el prefijo `package/` que npm pone a todas las entradas.
+// Drops the `package/` prefix npm puts on every entry.
 fn strip_prefix(path: &str) -> String {
     path.strip_prefix("package/").unwrap_or(path).to_owned()
 }
 
-/// Lee un `.tgz` de npm en memoria.
+/// Reads an npm `.tgz` in memory.
 pub fn read_tarball(bytes: &[u8]) -> Result<Package, Error> {
     let mut archive = tar::Archive::new(GzDecoder::new(bytes));
     let mut manifest_text: Option<String> = None;
@@ -77,7 +77,7 @@ pub fn read_tarball(bytes: &[u8]) -> Result<Package, Error> {
             continue;
         }
 
-        // Un fichero binario o gigante se salta en vez de reventar el análisis.
+        // A binary or oversized file is skipped rather than blowing up the run.
         let mut text = String::new();
         if entry
             .by_ref()
@@ -119,7 +119,7 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use std::io::Write;
 
-    // Construye un .tgz de npm en memoria: las entradas van bajo `package/`.
+    // Builds an npm .tgz in memory: entries go under `package/`.
     fn tarball(files: &[(&str, &str)]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         for (name, body) in files {
@@ -160,7 +160,7 @@ mod tests {
         let bytes = tarball(&[
             ("package.json", manifest),
             ("index.js", "const a = 1;"),
-            ("README.md", "# hola"),
+            ("README.md", "# hello"),
         ]);
         let pkg = read_tarball(&bytes).unwrap();
         let paths: Vec<&str> = pkg.sources.iter().map(|s| s.path.as_str()).collect();
@@ -170,14 +170,11 @@ mod tests {
     #[test]
     fn detects_a_bundled_package() {
         let manifest = r#"{"name":"x","version":"1.0.0"}"#;
-        // Una línea larguísima es la firma de un bundle minificado.
+        // A very long line is the signature of a minified bundle.
         let minified = format!("const a={};", "1+".repeat(400));
         let bytes = tarball(&[("package.json", manifest), ("dist/index.js", &minified)]);
         let pkg = read_tarball(&bytes).unwrap();
-        assert!(
-            pkg.bundled,
-            "un dist minificado debe marcarse como empaquetado"
-        );
+        assert!(pkg.bundled, "a minified dist must be flagged as bundled");
     }
 
     #[test]

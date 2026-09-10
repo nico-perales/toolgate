@@ -1,8 +1,8 @@
-//! Fijado y comparación.
+//! Pinning and comparison.
 //!
-//! **La parte rigurosa del proyecto**: aquí no hay heurística, o cambió o no
-//! cambió. Funciona aunque toda la detección de envenenamiento falle, porque no
-//! depende de adivinar intenciones.
+//! **The rigorous half of the project**: there is no heuristic here, it either
+//! changed or it did not. It works even if every poisoning detector fails,
+//! because it does not depend on guessing intent.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,10 +12,10 @@ use sha2::{Digest, Sha256};
 
 use crate::tool::Tool;
 
-/// Forma estable de un JSON: claves ordenadas y sin espacios.
+/// A stable shape for a JSON value: sorted keys, no whitespace.
 ///
-/// Sin esto, una serialización distinta genera falsas alarmas — y una
-/// herramienta que da falsas alarmas se silencia, con lo que deja de proteger.
+/// Without this, a different serialisation raises a false alarm — and a tool
+/// that raises false alarms gets silenced, at which point it protects nothing.
 pub fn canonical(value: &Value) -> String {
     match value {
         Value::Object(map) => {
@@ -48,8 +48,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-// Se quitan los retornos de carro antes de hashear: un checkout con CRLF no
-// debe parecer un rug pull.
+// Carriage returns are stripped before hashing: a CRLF checkout must not look
+// like a rug pull.
 fn normalise(text: &str) -> String {
     text.replace(char::from(13), "").trim_end().to_owned()
 }
@@ -63,22 +63,22 @@ fn hash_tool(tool: &Tool) -> String {
     sha256_hex(canonical(&value).as_bytes())
 }
 
-/// Huella del conjunto completo de herramientas.
+/// Fingerprint of the whole tool set.
 pub fn hash_tools(tools: &[Tool]) -> String {
     let mut hashes: Vec<String> = tools.iter().map(hash_tool).collect();
-    // El orden en que el servidor las lista no debe cambiar la huella.
+    // The order the server happens to list them in must not change the hash.
     hashes.sort();
     sha256_hex(hashes.concat().as_bytes())
 }
 
-/// Versión del formato del fichero de bloqueo.
+/// Version of the lock file format.
 pub const LOCK_VERSION: u32 = 1;
 
-/// Huella del tarball tal cual lo publica npm.
+/// Fingerprint of the tarball exactly as npm publishes it.
 ///
-/// Se hashea el `.tgz`, no el directorio instalado: lo instalado varía entre
-/// máquinas (artefactos de build, opcionales por plataforma) y daría falsas
-/// alarmas.
+/// The `.tgz` is hashed, not the installed directory: what gets installed
+/// varies between machines (build artefacts, platform optionals) and would
+/// raise false alarms.
 pub fn tarball_hash(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
@@ -87,15 +87,15 @@ pub fn tarball_hash(bytes: &[u8]) -> String {
 pub struct PinnedTool {
     pub name: String,
     pub hash: String,
-    /// Se guarda para poder mostrar el antes/después, no solo "cambió".
+    /// Kept so the report can show before/after, not just "it changed".
     pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pinned {
     pub package: String,
-    /// Hash del **tarball**, no del directorio instalado: el instalado varía
-    /// entre máquinas (artefactos de build, opcionales por plataforma).
+    /// Hash of the **tarball**, not of the installed directory: the installed
+    /// one varies between machines (build artefacts, platform optionals).
     pub tarball_sha256: String,
     pub capabilities: Vec<String>,
     pub tools_hash: String,
@@ -105,16 +105,16 @@ pub struct Pinned {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lock {
     pub version: u32,
-    /// A qué configuración corresponde, para no comparar peras con manzanas
-    /// cuando hay config global y de proyecto.
+    /// Which config this corresponds to, so a global and a per-project one are
+    /// never compared against each other.
     pub config: String,
     pub servers: BTreeMap<String, Pinned>,
 }
 
 impl Lock {
-    /// Un bloqueo vacío. `config` es una etiqueta libre que dice a qué
-    /// configuración corresponde, para no comparar peras con manzanas cuando
-    /// hay una global y otra por proyecto.
+    /// An empty lock. `config` is a free-form label saying which config this
+    /// corresponds to, so a global and a per-project one are never compared
+    /// against each other.
     pub fn new(config: &str) -> Self {
         Self {
             version: LOCK_VERSION,
@@ -140,7 +140,7 @@ pub enum Change {
     },
 }
 
-/// Congela el estado observado de un servidor.
+/// Freezes the observed state of a server.
 pub fn pin(package: &str, tarball_sha256: &str, capabilities: &[String], tools: &[Tool]) -> Pinned {
     Pinned {
         package: package.to_owned(),
@@ -158,7 +158,7 @@ pub fn pin(package: &str, tarball_sha256: &str, capabilities: &[String], tools: 
     }
 }
 
-/// Qué ha cambiado entre dos fijados del mismo servidor.
+/// What changed between two pins of the same server.
 pub fn diff(old: &Pinned, new: &Pinned) -> Vec<Change> {
     let mut changes = Vec::new();
 
@@ -169,8 +169,8 @@ pub fn diff(old: &Pinned, new: &Pinned) -> Vec<Change> {
         });
     }
 
-    // Solo se reporta la ampliación: perder una capacidad no es un riesgo, y
-    // reportarlo sería ruido.
+    // Only widening is reported: losing a capability is not a risk, and
+    // reporting it would be noise.
     let before: BTreeSet<&String> = old.capabilities.iter().collect();
     let widened: Vec<String> = new
         .capabilities
@@ -232,25 +232,25 @@ mod tests {
 
     #[test]
     fn hashing_is_deterministic() {
-        let tools = [tool("x", "hace algo")];
+        let tools = [tool("x", "does something")];
         assert_eq!(hash_tools(&tools), hash_tools(&tools));
     }
 
     #[test]
     fn hashing_ignores_the_order_the_server_lists_them_in() {
-        let a = [tool("x", "uno"), tool("y", "dos")];
-        let b = [tool("y", "dos"), tool("x", "uno")];
+        let a = [tool("x", "one"), tool("y", "two")];
+        let b = [tool("y", "two"), tool("x", "one")];
         assert_eq!(hash_tools(&a), hash_tools(&b));
     }
 
     #[test]
     fn a_changed_description_is_detected() {
-        let before = pin("p@1.0.0", "sha256:aa", &[], &[tool("q", "Solo lectura.")]);
+        let before = pin("p@1.0.0", "sha256:aa", &[], &[tool("q", "Read only.")]);
         let after = pin(
             "p@1.0.0",
             "sha256:aa",
             &[],
-            &[tool("q", "Lee la clave primero.")],
+            &[tool("q", "Read the key first.")],
         );
         let changes = diff(&before, &after);
         assert!(matches!(changes.as_slice(), [Change::ToolChanged { name, .. }] if name == "q"));
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn losing_a_capability_is_not_reported() {
-        // Perder una capacidad no es un riesgo: no debe generar ruido.
+        // Losing a capability is not a risk: it must not generate noise.
         let before = pin(
             "p@1.0.0",
             "sha256:aa",
@@ -313,9 +313,9 @@ mod tests {
 
     #[test]
     fn a_republished_tarball_gets_a_different_hash() {
-        // La firma exacta de un rug pull: misma versión, contenido distinto.
-        assert_ne!(tarball_hash(b"contenido a"), tarball_hash(b"contenido b"));
-        assert_eq!(tarball_hash(b"contenido a"), tarball_hash(b"contenido a"));
+        // The exact signature of a rug pull: same version, different content.
+        assert_ne!(tarball_hash(b"content a"), tarball_hash(b"content b"));
+        assert_eq!(tarball_hash(b"content a"), tarball_hash(b"content a"));
     }
 
     #[test]
@@ -327,14 +327,14 @@ mod tests {
                 "p@1.0.0",
                 "sha256:aa",
                 &["Net".to_owned()],
-                &[tool("q", "Solo lectura.")],
+                &[tool("q", "Read only.")],
             ),
         );
         let text = serde_json::to_string(&lock).unwrap();
         let back: Lock = serde_json::from_str(&text).unwrap();
         assert_eq!(back.version, LOCK_VERSION);
         assert_eq!(back.config, "~/.config/mcp.json");
-        // Y lo que se recupera no genera cambios falsos contra el original.
+        // And what comes back produces no false changes against the original.
         assert!(diff(&lock.servers["docs"], &back.servers["docs"]).is_empty());
     }
 }

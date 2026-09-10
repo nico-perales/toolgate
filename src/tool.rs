@@ -1,6 +1,6 @@
-//! El vocabulario compartido: una herramienta declarada por un servidor MCP.
+//! The shared vocabulary: a tool as declared by an MCP server.
 //!
-//! Lo producen `mcp`, lo inspecciona `poison` y lo fija `lock`.
+//! Produced by `mcp`, inspected by `poison`, pinned by `lock`.
 
 use serde::{Deserialize, Serialize};
 

@@ -1,8 +1,8 @@
-//! La orquestación del análisis, y el **veto**.
+//! Orchestration of the analysis, and the **veto**.
 //!
-//! La regla que sostiene el diseño: arrancar un servidor no confiado para
-//! enumerarlo puede ejecutar su código, así que el análisis estático va primero
-//! y tiene poder de veto. Sin esto, el orden "estático primero" sería decorativo.
+//! The rule the design rests on: starting an untrusted server to enumerate it
+//! can run its code, so the static pass goes first and holds a veto. Without
+//! that, "static first" would be decorative.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,22 +19,22 @@ const ENUMERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 #[derive(Debug)]
 pub struct Audit {
     pub package: String,
-    /// El paquete se publica minificado: el inventario es aproximado.
+    /// The package ships minified: the inventory is approximate.
     pub bundled: bool,
     pub capabilities: Vec<Evidence>,
     pub scripts: BTreeMap<String, String>,
     pub tools: Vec<Tool>,
     pub signals: Vec<Signal>,
-    /// Presente si el análisis estático prohibió arrancar el servidor.
+    /// Present when the static pass forbade starting the server.
     pub vetoed: Option<String>,
 }
 
 impl Audit {
-    /// Nombres únicos y ordenados de las capacidades detectadas.
+    /// Unique, sorted names of the capabilities found.
     ///
-    /// Es lo que se fija y lo que se compara: el orden y las repeticiones del
-    /// inventario dependen de en qué fichero apareció cada cosa, y eso cambia
-    /// entre publicaciones sin que cambie nada relevante.
+    /// This is what gets pinned and compared: the order and repetitions of the
+    /// raw inventory depend on which file each one turned up in, and that
+    /// changes between releases without anything relevant changing.
     pub fn capability_names(&self) -> Vec<String> {
         let unique: BTreeSet<String> = self
             .capabilities
@@ -45,27 +45,27 @@ impl Audit {
     }
 }
 
-/// Motivos por los que el análisis estático prohíbe arrancar el servidor.
+/// Reasons the static pass forbids starting the server.
 fn veto(pkg: &Package, evidence: &[Evidence]) -> Option<String> {
-    // Un script de instalación es código que se ejecuta antes que nada: si lo
-    // hay, no se arranca el servidor para enumerarlo.
+    // An install script is code that runs before anything else: if there is
+    // one, the server is not started in order to enumerate it.
     for hook in ["preinstall", "install", "postinstall"] {
         if let Some(command) = pkg.scripts.get(hook) {
             return Some(format!("{hook} script: {command}"));
         }
     }
-    // Evaluación dinámica: el inventario estático ya no es completo, así que no
-    // se puede afirmar que arrancarlo sea razonable.
+    // Dynamic evaluation: the static inventory is no longer complete, so there
+    // is no basis for claiming that starting it is reasonable.
     if evidence.iter().any(|e| e.capability == Capability::Dynamic) {
         return Some("the package uses dynamic evaluation (eval or a computed require)".to_owned());
     }
     None
 }
 
-/// Análisis completo de un tarball.
+/// Full analysis of a tarball.
 ///
-/// La enumeración solo ocurre si el análisis estático no la veta **y** se ha
-/// dado un comando para arrancar el servidor.
+/// Enumeration only happens when the static pass does not veto it **and** a
+/// command to start the server was given.
 pub fn audit(tarball: &[u8], launch_command: Option<(&str, &[String])>) -> Result<Audit, Error> {
     let package = pkg::read_tarball(tarball)?;
     let evidence = capabilities::scan(&package);
@@ -81,7 +81,7 @@ pub fn audit(tarball: &[u8], launch_command: Option<(&str, &[String])>) -> Resul
     };
 
     if let Some(reason) = veto(&package, &evidence) {
-        // Se informa, no se arranca.
+        // It reports; it does not start anything.
         report.vetoed = Some(reason);
         return Ok(report);
     }
@@ -149,7 +149,8 @@ mod tests {
         let source = "const fs = require('fs');";
         let bytes = tarball(&[("package.json", manifest), ("index.js", source)]);
         let report = audit(&bytes, None).unwrap();
-        // Las capacidades son información, no hallazgo: se listan aunque esté limpio.
+        // Capabilities are information, not a finding: they are listed even
+        // when the package is clean.
         assert!(!report.capabilities.is_empty());
         assert!(report.vetoed.is_none());
     }

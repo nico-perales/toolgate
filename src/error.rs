@@ -1,4 +1,4 @@
-//! Tipo de error del crate.
+//! The crate's error type.
 
 use thiserror::Error;
 
