@@ -19,46 +19,51 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Analiza el tarball de un servidor MCP.
+    /// Audit an MCP server's npm tarball.
     Audit {
-        /// El .tgz del paquete, tal cual lo publica npm.
+        /// The .tgz exactly as npm publishes it.
         tarball: PathBuf,
-        /// Tras `--`, el comando que arranca el servidor para enumerar sus
-        /// herramientas. Sin esto solo se hace el análisis estático.
+        /// After `--`, the command that starts the server so its tools can be
+        /// enumerated. Without it, only the static pass runs.
         #[arg(last = true, allow_hyphen_values = true)]
         launch: Vec<String>,
     },
 
-    /// Fija el estado actual de un servidor: paquete, capacidades y
-    /// herramientas. Es la línea base contra la que compara `check`.
+    /// Record the current state of a server — package, capabilities and tools
+    /// — as the baseline `check` compares against.
     Pin {
+        /// The .tgz exactly as npm publishes it.
         tarball: PathBuf,
+        /// Where the baseline is stored.
         #[arg(long, default_value = "toolgate.lock")]
         lock: PathBuf,
-        /// Con qué nombre se guarda. Por defecto, el del paquete.
+        /// Name to store it under. Defaults to the package name.
         #[arg(long)]
         name: Option<String>,
-        /// A qué configuración de cliente MCP corresponde este bloqueo.
+        /// Which MCP client config this lock file corresponds to.
         #[arg(long)]
         config: Option<String>,
-        /// Fija aunque la auditoría haya encontrado señales críticas.
+        /// Pin even though the audit found critical signals.
         #[arg(long)]
         force: bool,
-        /// Tras `--`, el comando que arranca el servidor. Obligatorio: fijar
-        /// sin enumerar guardaría cero herramientas, que es justo lo que hay
-        /// que vigilar.
+        /// After `--`, the command that starts the server. Required: pinning
+        /// without enumerating would store zero tools, which is precisely what
+        /// needs watching.
         #[arg(last = true, allow_hyphen_values = true, required = true)]
         launch: Vec<String>,
     },
 
-    /// Vuelve a auditar y compara con lo fijado.
+    /// Re-audit a server and report what changed since it was pinned.
     Check {
+        /// The .tgz exactly as npm publishes it.
         tarball: PathBuf,
+        /// Where the baseline was stored.
         #[arg(long, default_value = "toolgate.lock")]
         lock: PathBuf,
+        /// Name it was pinned under. Defaults to the package name.
         #[arg(long)]
         name: Option<String>,
-        /// Tras `--`, el comando que arranca el servidor.
+        /// After `--`, the command that starts the server.
         #[arg(last = true, allow_hyphen_values = true, required = true)]
         launch: Vec<String>,
     },
@@ -98,14 +103,14 @@ fn run() -> Result<ExitCode> {
 // --- utilidades ---
 
 fn read_tarball_file(path: &Path) -> Result<Vec<u8>> {
-    std::fs::read(path).with_context(|| format!("leyendo {}", path.display()))
+    std::fs::read(path).with_context(|| format!("reading {}", path.display()))
 }
 
 fn split_launch(parts: &[String]) -> Result<(&str, &[String])> {
     parts
         .split_first()
         .map(|(command, args)| (command.as_str(), args))
-        .context("tras `--` hace falta al menos el comando que arranca el servidor")
+        .context("`--` must be followed by the command that starts the server")
 }
 
 /// De "@ambito/nombre@1.2.3" saca "@ambito/nombre"; de "nombre@1.2.3", "nombre".
@@ -138,18 +143,18 @@ fn load_lock(path: &Path) -> Result<Option<Lock>> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let lock: Lock = serde_json::from_str(&text)
-                .with_context(|| format!("{} no es un bloqueo válido", path.display()))?;
+                .with_context(|| format!("{} is not a valid lock file", path.display()))?;
             Ok(Some(lock))
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("leyendo {}", path.display())),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
     }
 }
 
 fn save_lock(path: &Path, lock: &Lock) -> Result<()> {
-    let mut text = serde_json::to_string_pretty(lock).context("serializando el bloqueo")?;
+    let mut text = serde_json::to_string_pretty(lock).context("serialising the lock file")?;
     text.push('\n');
-    std::fs::write(path, text).with_context(|| format!("escribiendo {}", path.display()))
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
 fn pinned_from(report: &Audit, bytes: &[u8]) -> Pinned {
@@ -196,20 +201,20 @@ fn run_pin(
     print!("{}", render(&report));
 
     if let Some(reason) = &report.vetoed {
-        eprintln!("\ntoolgate: no se fija nada ({reason}).");
-        eprintln!("Fijar sin enumerar guardaría cero herramientas, y el próximo");
-        eprintln!("check las vería aparecer todas como nuevas.");
+        eprintln!("\ntoolgate: nothing pinned ({reason}).");
+        eprintln!("Pinning without enumerating would store zero tools, and the");
+        eprintln!("next check would see every one of them appear as new.");
         return Ok(ExitCode::from(1));
     }
     if report.tools.is_empty() {
-        eprintln!("\ntoolgate: el servidor no declaró ninguna herramienta.");
-        eprintln!("No hay nada que fijar.");
+        eprintln!("\ntoolgate: the server declared no tools at all.");
+        eprintln!("There is nothing to pin.");
         return Ok(ExitCode::from(1));
     }
     if !force && !critical_signals(&report).is_empty() {
-        eprintln!("\ntoolgate: hay señales críticas sin resolver.");
-        eprintln!("Fijar ahora congelaría esto como la línea base de confianza.");
-        eprintln!("Revísalo; si aun así lo aceptas, repite con --force.");
+        eprintln!("\ntoolgate: there are unresolved critical signals.");
+        eprintln!("Pinning now would freeze this as your trusted baseline.");
+        eprintln!("Review it; if you accept it anyway, repeat with --force.");
         return Ok(ExitCode::from(1));
     }
 
@@ -225,12 +230,12 @@ fn run_pin(
     save_lock(lock_path, &lock)?;
 
     let verb = if replaced.is_some() {
-        "Refijado"
+        "Re-pinned"
     } else {
-        "Fijado"
+        "Pinned"
     };
     println!(
-        "\n{verb} {key} en {} — {} · {} herramienta(s)",
+        "\n{verb} {key} in {} — {} · {} tool(s)",
         lock_path.display(),
         report.package,
         report.tools.len()
@@ -251,14 +256,14 @@ fn run_check(
     let key = name.unwrap_or_else(|| server_key(&report.package).to_owned());
     let lock = load_lock(lock_path)?.with_context(|| {
         format!(
-            "no existe {}; fija una línea base con `toolgate pin`",
+            "{} does not exist; record a baseline with `toolgate pin` first",
             lock_path.display()
         )
     })?;
     let old = lock
         .servers
         .get(&key)
-        .with_context(|| format!("no hay nada fijado para {key} en {}", lock_path.display()))?;
+        .with_context(|| format!("nothing is pinned for {key} in {}", lock_path.display()))?;
     let new = pinned_from(&report, &bytes);
 
     if let Some(reason) = &report.vetoed {
@@ -266,10 +271,10 @@ fn run_check(
         // mentira: no se han mirado.
         let static_changes = diff(&without_tools(old), &without_tools(&new));
         print!("{}", render_changes(&static_changes));
-        println!("\nNO se arrancó el servidor: {reason}");
-        println!("Las herramientas NO se han comparado; lo de arriba es solo la");
-        println!("parte estática. Que un servidor ya fijado pase a vetarse es en");
-        println!("sí mismo un cambio.");
+        println!("\nServer NOT started: {reason}");
+        println!("The tools were NOT compared; the above covers only the static");
+        println!("half. A server that was fine when pinned and now refuses to be");
+        println!("enumerated is itself a change.");
         return Ok(ExitCode::from(1));
     }
 
@@ -279,7 +284,7 @@ fn run_check(
     let critical = critical_signals(&report);
     if !critical.is_empty() {
         println!(
-            "\nAdemás, {} señal(es) crítica(s) vigentes:",
+            "\nAlso, {} critical signal(s) still standing:",
             critical.len()
         );
         for signal in &critical {

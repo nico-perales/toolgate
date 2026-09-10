@@ -51,13 +51,13 @@ fn veto(pkg: &Package, evidence: &[Evidence]) -> Option<String> {
     // hay, no se arranca el servidor para enumerarlo.
     for hook in ["preinstall", "install", "postinstall"] {
         if let Some(command) = pkg.scripts.get(hook) {
-            return Some(format!("script {hook}: {command}"));
+            return Some(format!("{hook} script: {command}"));
         }
     }
     // Evaluación dinámica: el inventario estático ya no es completo, así que no
     // se puede afirmar que arrancarlo sea razonable.
     if evidence.iter().any(|e| e.capability == Capability::Dynamic) {
-        return Some("el paquete usa evaluación dinámica (eval o require calculado)".to_owned());
+        return Some("the package uses dynamic evaluation (eval or a computed require)".to_owned());
     }
     None
 }

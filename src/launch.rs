@@ -48,11 +48,11 @@ impl Contained {
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| Error::Protocol("el proceso no expone stdin".to_owned()))?;
+            .ok_or_else(|| Error::Protocol("the process exposes no stdin".to_owned()))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| Error::Protocol("el proceso no expone stdout".to_owned()))?;
+            .ok_or_else(|| Error::Protocol("the process exposes no stdout".to_owned()))?;
 
         // Un hilo lector empujando líneas por un canal: es la forma portable de
         // tener timeout de lectura sin async ni APIs específicas del SO.
@@ -90,7 +90,7 @@ impl Contained {
             Ok(line) => Ok(line),
             Err(RecvTimeoutError::Timeout) => Err(Error::Timeout),
             Err(RecvTimeoutError::Disconnected) => {
-                Err(Error::Protocol("el servidor cerró la salida".to_owned()))
+                Err(Error::Protocol("the server closed its output".to_owned()))
             }
         }
     }

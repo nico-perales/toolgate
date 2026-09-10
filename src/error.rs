@@ -4,22 +4,22 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("no se pudo leer el tarball: {0}")]
+    #[error("could not read the tarball: {0}")]
     Tarball(String),
 
-    #[error("package.json inválido o ausente: {0}")]
+    #[error("missing or invalid package.json: {0}")]
     Manifest(String),
 
-    #[error("el servidor no respondió a tiempo")]
+    #[error("the server did not answer in time")]
     Timeout,
 
-    #[error("respuesta MCP inválida: {0}")]
+    #[error("invalid MCP response: {0}")]
     Protocol(String),
 
-    #[error("el análisis estático vetó el arranque: {0}")]
+    #[error("the static pass vetoed the launch: {0}")]
     Vetoed(String),
 
-    #[error("i/o error en {path}")]
+    #[error("i/o error on {path}")]
     Io {
         path: String,
         #[source]

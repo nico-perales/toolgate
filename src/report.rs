@@ -15,18 +15,18 @@ use crate::poison::Severity;
 pub fn render(report: &Audit) -> String {
     let mut out = String::new();
 
-    let _ = write!(out, "Paquete: {}", report.package);
+    let _ = write!(out, "Package: {}", report.package);
     if report.bundled {
-        let _ = write!(out, "  (empaquetado: el inventario es aproximado)");
+        let _ = write!(out, "  (bundled: the inventory is approximate)");
     }
     out.push('\n');
 
     // --- capacidades: información ---
     let caps = report.capability_names();
     out.push('\n');
-    out.push_str("Capacidades (información, no hallazgos)\n");
+    out.push_str("Capabilities (information, not findings)\n");
     if caps.is_empty() {
-        out.push_str("  ninguna detectada\n");
+        out.push_str("  none detected\n");
     } else {
         let _ = writeln!(out, "  {}", caps.join(", "));
     }
@@ -34,39 +34,39 @@ pub fn render(report: &Audit) -> String {
     // --- scripts de instalación: esto sí importa ---
     for hook in ["preinstall", "install", "postinstall"] {
         if let Some(command) = report.scripts.get(hook) {
-            let _ = writeln!(out, "  ! script {hook}: {command}");
+            let _ = writeln!(out, "  ! {hook} script: {command}");
         }
     }
 
     // --- el veto corta aquí ---
     if let Some(reason) = &report.vetoed {
-        let _ = writeln!(out, "\nNO se arrancó el servidor: {reason}");
-        out.push_str("Las herramientas no se han enumerado, así que no se puede\n");
-        out.push_str("afirmar nada sobre lo que este servidor inyecta en el contexto.\n");
+        let _ = writeln!(out, "\nServer NOT started: {reason}");
+        out.push_str("Its tools were never enumerated, so nothing can be claimed\n");
+        out.push_str("about what this server injects into the model's context.\n");
         return out;
     }
 
     // --- herramientas ---
-    let _ = writeln!(out, "\nHerramientas: {}", report.tools.len());
+    let _ = writeln!(out, "\nTools: {}", report.tools.len());
     let mut critical = 0usize;
     let mut warnings = 0usize;
     for signal in &report.signals {
         match signal.severity {
             Severity::Critical => {
                 critical += 1;
-                let _ = writeln!(out, "  x CRITICO  {} — {}", signal.tool, signal.detail);
+                let _ = writeln!(out, "  x CRITICAL  {} — {}", signal.tool, signal.detail);
             }
             Severity::Warning => {
                 warnings += 1;
-                let _ = writeln!(out, "  ! aviso    {} — {}", signal.tool, signal.detail);
+                let _ = writeln!(out, "  ! warning   {} — {}", signal.tool, signal.detail);
             }
         }
     }
     if report.signals.is_empty() && !report.tools.is_empty() {
-        out.push_str("  sin señales\n");
+        out.push_str("  no signals\n");
     }
 
-    let _ = writeln!(out, "\n{critical} crítico(s) · {warnings} aviso(s)");
+    let _ = writeln!(out, "\n{critical} critical · {warnings} warning(s)");
     out
 }
 
@@ -81,7 +81,7 @@ fn one_line(text: &str) -> String {
         return collapsed;
     }
     let head: String = collapsed.chars().take(MAX).collect();
-    format!("{head}… (+{} caracteres)", total - MAX)
+    format!("{head}… (+{} more characters)", total - MAX)
 }
 
 /// Informe legible de un `check`: qué cambió respecto a lo fijado.
@@ -91,11 +91,15 @@ fn one_line(text: &str) -> String {
 pub fn render_changes(changes: &[Change]) -> String {
     let mut out = String::new();
     if changes.is_empty() {
-        out.push_str("Sin cambios respecto a lo fijado.\n");
+        out.push_str("No changes since the pinned baseline.\n");
         return out;
     }
 
-    let _ = writeln!(out, "{} cambio(s) respecto a lo fijado:", changes.len());
+    let _ = writeln!(
+        out,
+        "{} change(s) since the pinned baseline:",
+        changes.len()
+    );
     for change in changes {
         match change {
             Change::PackageChanged { before, after } => {
@@ -103,31 +107,28 @@ pub fn render_changes(changes: &[Change]) -> String {
                     // Mismo nombre y misma versión, pero otro tarball. npm no
                     // debería reescribir una versión publicada: esto es lo más
                     // parecido a una prueba de rug pull que existe.
-                    let _ = writeln!(
-                        out,
-                        "  x {before} cambió de contenido SIN cambiar de versión"
-                    );
+                    let _ = writeln!(out, "  x {before} changed content WITHOUT changing version");
                 } else {
-                    let _ = writeln!(out, "  x el paquete cambió: {before} -> {after}");
+                    let _ = writeln!(out, "  x the package changed: {before} -> {after}");
                 }
             }
             Change::CapabilitiesWidened(caps) => {
-                let _ = writeln!(out, "  x capacidades nuevas: {}", caps.join(", "));
+                let _ = writeln!(out, "  x new capabilities: {}", caps.join(", "));
             }
             Change::ToolAdded(name) => {
-                let _ = writeln!(out, "  x herramienta nueva: {name}");
+                let _ = writeln!(out, "  x new tool: {name}");
             }
             Change::ToolRemoved(name) => {
-                let _ = writeln!(out, "  ! herramienta desaparecida: {name}");
+                let _ = writeln!(out, "  ! tool gone: {name}");
             }
             Change::ToolChanged {
                 name,
                 before,
                 after,
             } => {
-                let _ = writeln!(out, "  x cambió la descripción de {name}");
-                let _ = writeln!(out, "      antes: {}", one_line(before));
-                let _ = writeln!(out, "      ahora: {}", one_line(after));
+                let _ = writeln!(out, "  x the description of {name} changed");
+                let _ = writeln!(out, "      before: {}", one_line(before));
+                let _ = writeln!(out, "      after:  {}", one_line(after));
             }
         }
     }
@@ -155,22 +156,22 @@ mod tests {
 
     #[test]
     fn a_veto_explains_that_nothing_was_enumerated() {
-        let text = render(&empty(Some("script postinstall: node s.js".to_owned())));
-        assert!(text.contains("NO se arrancó el servidor"));
-        assert!(text.contains("no se puede"));
+        let text = render(&empty(Some("postinstall script: node s.js".to_owned())));
+        assert!(text.contains("Server NOT started"));
+        assert!(text.contains("nothing can be claimed"));
         // No debe hablar de herramientas si no las enumeró.
-        assert!(!text.contains("Herramientas:"));
+        assert!(!text.contains("Tools:"));
     }
 
     #[test]
     fn capabilities_are_labelled_as_information() {
         let text = render(&empty(None));
-        assert!(text.contains("información, no hallazgos"));
+        assert!(text.contains("information, not findings"));
     }
 
     #[test]
     fn no_changes_says_so_plainly() {
-        assert!(render_changes(&[]).contains("Sin cambios"));
+        assert!(render_changes(&[]).contains("No changes"));
     }
 
     #[test]
@@ -179,7 +180,7 @@ mod tests {
             before: "p@1.0.0".to_owned(),
             after: "p@1.0.0".to_owned(),
         }]);
-        assert!(text.contains("SIN cambiar de versión"));
+        assert!(text.contains("WITHOUT changing version"));
     }
 
     #[test]
@@ -189,7 +190,7 @@ mod tests {
             after: "p@1.1.0".to_owned(),
         }]);
         assert!(text.contains("p@1.0.0 -> p@1.1.0"));
-        assert!(!text.contains("SIN cambiar de versión"));
+        assert!(!text.contains("WITHOUT changing version"));
     }
 
     #[test]
@@ -197,10 +198,10 @@ mod tests {
         let padding = "x ".repeat(400);
         let text = render_changes(&[Change::ToolChanged {
             name: "q".to_owned(),
-            before: "Solo lectura.".to_owned(),
+            before: "Read only.".to_owned(),
             after: padding,
         }]);
-        assert!(text.contains("caracteres)"));
+        assert!(text.contains("more characters)"));
         // Cuatro líneas: la cabecera, el titular del cambio, el antes y el ahora.
         assert_eq!(text.lines().count(), 4);
     }

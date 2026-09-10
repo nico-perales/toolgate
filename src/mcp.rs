@@ -43,7 +43,7 @@ fn read_response(server: &mut Contained, id: u64, timeout: Duration) -> Result<V
             return value
                 .get("result")
                 .cloned()
-                .ok_or_else(|| Error::Protocol("respuesta sin result".to_owned()));
+                .ok_or_else(|| Error::Protocol("response has no result field".to_owned()));
         }
     }
 }
@@ -80,7 +80,7 @@ pub fn list_tools(server: &mut Contained, timeout: Duration) -> Result<Vec<Tool>
     let tools = result
         .get("tools")
         .cloned()
-        .ok_or_else(|| Error::Protocol("tools/list sin campo tools".to_owned()))?;
+        .ok_or_else(|| Error::Protocol("tools/list response has no tools field".to_owned()))?;
     serde_json::from_value(tools).map_err(|e| Error::Protocol(e.to_string()))
 }
 

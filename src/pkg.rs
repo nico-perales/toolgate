@@ -95,8 +95,8 @@ pub fn read_tarball(bytes: &[u8]) -> Result<Package, Error> {
         }
     }
 
-    let manifest_text =
-        manifest_text.ok_or_else(|| Error::Manifest("no hay package.json".to_owned()))?;
+    let manifest_text = manifest_text
+        .ok_or_else(|| Error::Manifest("no package.json in the tarball".to_owned()))?;
     let manifest: Manifest =
         serde_json::from_str(&manifest_text).map_err(|e| Error::Manifest(e.to_string()))?;
 
