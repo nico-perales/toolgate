@@ -150,6 +150,16 @@ mod tests {
         assert_eq!(line.trim(), "hello");
     }
 
+    // Variables the child's own runtime puts back after we cleared the
+    // environment. macOS CoreFoundation sets `__CF_USER_TEXT_ENCODING` during
+    // its own initialisation, so finding it in the child says nothing about
+    // what toolgate passed — and it must NOT go in `ALLOWED_ENV`, because we
+    // still do not want to hand it over ourselves.
+    #[cfg(target_os = "macos")]
+    const SELF_INJECTED: &[&str] = &["__CF_USER_TEXT_ENCODING"];
+    #[cfg(not(target_os = "macos"))]
+    const SELF_INJECTED: &[&str] = &[];
+
     #[test]
     fn the_child_sees_only_the_allowed_variables() {
         // Asserting the actual property beats counting: an earlier version of
@@ -166,7 +176,12 @@ mod tests {
         let names: Vec<&str> = line.trim().split(',').filter(|n| !n.is_empty()).collect();
         let leaked: Vec<&&str> = names
             .iter()
-            .filter(|name| !ALLOWED_ENV.iter().any(|a| a.eq_ignore_ascii_case(name)))
+            .filter(|name| {
+                !ALLOWED_ENV
+                    .iter()
+                    .chain(SELF_INJECTED)
+                    .any(|a| a.eq_ignore_ascii_case(name))
+            })
             .collect();
         assert!(leaked.is_empty(), "the child inherited {leaked:?}");
         assert!(
