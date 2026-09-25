@@ -24,6 +24,9 @@ pub struct Audit {
     pub capabilities: Vec<Evidence>,
     pub scripts: BTreeMap<String, String>,
     pub tools: Vec<Tool>,
+    /// Whether the server was actually launched and its tools listed. Without
+    /// it, "no tools" and "not looked at" would print the same.
+    pub enumerated: bool,
     pub signals: Vec<Signal>,
     /// Present when the static pass forbade starting the server.
     pub vetoed: Option<String>,
@@ -76,6 +79,7 @@ pub fn audit(tarball: &[u8], launch_command: Option<(&str, &[String])>) -> Resul
         capabilities: evidence.clone(),
         scripts: package.scripts.clone(),
         tools: Vec::new(),
+        enumerated: false,
         signals: Vec::new(),
         vetoed: None,
     };
@@ -91,6 +95,7 @@ pub fn audit(tarball: &[u8], launch_command: Option<(&str, &[String])>) -> Resul
         let tools = mcp::list_tools(&mut server, ENUMERATION_TIMEOUT)?;
         report.signals = poison::inspect(&tools);
         report.tools = tools;
+        report.enumerated = true;
     }
 
     Ok(report)

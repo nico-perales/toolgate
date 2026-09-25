@@ -40,6 +40,17 @@ fn is_selector(n: u32) -> bool {
     (0xFE00..=0xFE0F).contains(&n) || (0xE0100..=0xE01EF).contains(&n)
 }
 
+/// Characters a person cannot see, or that reorder what they see. Reports print
+/// these escaped.
+pub(crate) fn is_hidden(c: char) -> bool {
+    let n = u32::from(c);
+    is_invisible(n)
+        || is_bidi(n)
+        || is_tag(n)
+        || is_selector(n)
+        || (c.is_control() && c != '\n' && c != '\t')
+}
+
 // Characters with no visible rendering: they hide text from the human review.
 fn invisible(text: &str) -> Option<char> {
     text.chars().find(|c| is_invisible(u32::from(*c)))

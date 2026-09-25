@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use toolgate::{
-    Audit, Lock, Pinned, Severity, Signal, audit, diff, pin, render, render_changes, tarball_hash,
+    Audit, Lock, Pinned, Severity, Signal, audit, diff, escape, pin, render, render_changes,
+    tarball_hash,
 };
 
 #[derive(Parser, Debug)]
@@ -235,9 +236,10 @@ fn run_pin(
         "Pinned"
     };
     println!(
-        "\n{verb} {key} in {} — {} · {} tool(s)",
+        "\n{verb} {} in {} — {} · {} tool(s)",
+        escape(&key),
         lock_path.display(),
-        report.package,
+        escape(&report.package),
         report.tools.len()
     );
     Ok(ExitCode::SUCCESS)
@@ -288,7 +290,7 @@ fn run_check(
             critical.len()
         );
         for signal in &critical {
-            println!("  x {} — {}", signal.tool, signal.detail);
+            println!("  x {} — {}", escape(&signal.tool), signal.detail);
         }
     }
 
