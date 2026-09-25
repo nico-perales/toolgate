@@ -119,11 +119,73 @@ Signals are split the same way, and the split is the point:
 - **Warning** — phrase heuristics ("before answering…", `~/.ssh`). Useful, and
   never promoted to critical, because they are guesses about intent.
 
+## Runtime proxy
+
+`toolgate proxy` sits between your MCP client and a server, and enforces at run
+time what `pin` and `check` can only compare after the fact. Put it in front of
+the server's command in your client's config:
+
+```json
+{
+  "command": "toolgate",
+  "args": ["proxy", "--name", "github", "--",
+           "npx", "-y", "@modelcontextprotocol/server-github"]
+}
+```
+
+- **First use:** it learns what the server declares, meaning every tool's full
+  definition and the server's `instructions`. Anything with a deterministic
+  poisoning signal is hidden instead of learnt.
+- **After that:** a tool whose definition changed becomes a stub that says so,
+  and a tool you never approved is hidden. Calls to either are answered by the
+  proxy itself, so they never reach the server. The change waits for you:
+
+```bash
+toolgate review github     # what changed, field by field, hidden characters escaped
+toolgate accept github     # approve it, then reconnect the server in your client
+```
+
+- **Outputs:** a tool result carrying text in Unicode tag characters, or a run
+  of variation selectors, is blocked. Everything else unusual in an output
+  (zero-width characters, HTML comments, right-to-left text) is normal in web
+  content, so it is logged, not blocked.
+- **Log:** one file per session under `~/.toolgate/logs/`, hash-chained. It
+  records tool names and hashes, never arguments or results.
+  `toolgate verify-log <file>` checks it.
+
+Pins live in `~/.toolgate/pins/`; set `TOOLGATE_HOME` to move both. Give each
+server a `--name`: without it, the key is derived from the whole command, so
+changing an argument starts a new first use.
+
+What the proxy cannot do:
+
+- **A server that can write your files can rewrite its own pin.** `audit` tells
+  you which servers have that capability. For those, the proxy's guarantees do
+  not hold.
+- **On Windows, a server that runs native code can reach your client
+  directly.** Windows hands every child process the proxy's own connection to
+  the client, and Rust offers no safe way to prevent it. It takes starting a
+  program, which `audit` reports as `Exec`, or loading a native module, which
+  `audit` does not detect yet.
+- **A hash chain does not prove a log is complete.** A cut at the end looks like
+  a crash, and anyone who can write the file can recompute the whole chain.
+  Each session prints the chain's head to stderr, which your client keeps in its
+  own logs; compare it with the head `verify-log` reports.
+- **Injected instructions in visible text** ("ignore your instructions…") are
+  only logged. Nothing deterministic tells them apart from legitimate content.
+- **On Linux and macOS, a server that ignores end-of-file** may leave processes
+  it started behind when the proxy stops it: the proxy kills the server's own
+  process, not its whole tree. On Windows it kills the tree.
+
 ## Status
 
 **It works end to end**, on real poisoned servers: reads the tarball, inventories
 capabilities, launches the server under a cleared environment, enumerates its
 tools, flags poisoning signals, pins the result and detects changes against it.
+
+The runtime proxy relays, pins and blocks, and it is tested end to end with
+scripted servers on all three platforms. Testing it against the official
+reference servers and a real client is next.
 
 ## What it does not do
 
@@ -137,9 +199,12 @@ Two limits stated up front, because they change how much you should trust it:
   what a tool *returns* (a "fetch this page" tool relaying attacker text), not in
   its description. That only exists at runtime.
 
-Both are the job of a proxy that sits in the live request path, which is a later
-deliverable. What holds regardless of any of this is the **pinning** and the
-**deterministic signals** — they do not depend on detecting intent.
+`toolgate proxy` closes part of both. It sits in the live request path, so a
+server cannot show it one thing and your client another, and it reads every
+output. But in an output it blocks only hidden-text smuggling: injected
+instructions in visible text are logged, not blocked. What holds regardless of
+any of this is the **pinning** and the **deterministic signals**: they do not
+depend on detecting intent.
 
 Also out of scope for now: automatic discovery of your MCP client config,
 downloading packages for you, the Python ecosystem, and the HTTP+SSE transport.
