@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 use toolgate::{
     Audit, Lock, Pinned, Severity, Signal, audit, diff, escape, pin, render, render_changes,
-    tarball_hash,
+    tarball_hash, veto_line,
 };
 
 #[derive(Parser, Debug)]
@@ -201,8 +201,9 @@ fn run_pin(
     let report = audit(&bytes, Some((command, args)))?;
     print!("{}", render(&report));
 
-    if let Some(reason) = &report.vetoed {
-        eprintln!("\ntoolgate: nothing pinned ({reason}).");
+    // The report above already shows the veto reason, escaped.
+    if report.vetoed.is_some() {
+        eprintln!("\ntoolgate: nothing pinned: the static pass vetoed the launch.");
         eprintln!("Pinning without enumerating would store zero tools, and the");
         eprintln!("next check would see every one of them appear as new.");
         return Ok(ExitCode::from(1));
@@ -262,10 +263,13 @@ fn run_check(
             lock_path.display()
         )
     })?;
-    let old = lock
-        .servers
-        .get(&key)
-        .with_context(|| format!("nothing is pinned for {key} in {}", lock_path.display()))?;
+    let old = lock.servers.get(&key).with_context(|| {
+        format!(
+            "nothing is pinned for {} in {}",
+            escape(&key),
+            lock_path.display()
+        )
+    })?;
     let new = pinned_from(&report, &bytes);
 
     if let Some(reason) = &report.vetoed {
@@ -273,7 +277,7 @@ fn run_check(
         // be a lie: they were never looked at.
         let static_changes = diff(&without_tools(old), &without_tools(&new));
         print!("{}", render_changes(&static_changes));
-        println!("\nServer NOT started: {reason}");
+        println!("\n{}", veto_line(reason));
         println!("The tools were NOT compared; the above covers only the static");
         println!("half. A server that was fine when pinned and now refuses to be");
         println!("enumerated is itself a change.");

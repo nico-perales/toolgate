@@ -28,6 +28,12 @@ pub fn escape(text: &str) -> String {
     out
 }
 
+/// The line that says a veto stopped the launch. The reason quotes the package's
+/// install script, so it is escaped here, once, for every caller.
+pub fn veto_line(reason: &str) -> String {
+    format!("Server NOT started: {}", escape(reason))
+}
+
 /// A readable report for an audit.
 pub fn render(report: &Audit) -> String {
     let mut out = String::new();
@@ -57,8 +63,7 @@ pub fn render(report: &Audit) -> String {
 
     // --- the veto cuts things off here ---
     if let Some(reason) = &report.vetoed {
-        // The reason quotes the install script, which is the package's text.
-        let _ = writeln!(out, "\nServer NOT started: {}", escape(reason));
+        let _ = writeln!(out, "\n{}", veto_line(reason));
         out.push_str("Its tools were never enumerated, so nothing can be claimed\n");
         out.push_str("about what this server injects into the model's context.\n");
         return out;
@@ -200,7 +205,7 @@ pub fn render_changes(changes: &[Change]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape, render, render_changes};
+    use super::{escape, render, render_changes, veto_line};
     use crate::audit::Audit;
     use crate::lock::{Change, FieldChange};
     use serde_json::Value;
@@ -317,5 +322,14 @@ mod tests {
             }],
         }]);
         assert!(text.contains("annotations.destructiveHint: true -> false"));
+    }
+
+    #[test]
+    fn the_veto_line_escapes_the_install_script() {
+        // Regression: `pin` and `check` printed the veto reason, which quotes the
+        // package's install script, without escaping it.
+        let line = veto_line(&format!("postinstall script: node x.js{}", ch(0x202E)));
+        assert!(line.contains("<U+202E>"));
+        assert!(!line.contains(ch(0x202E)));
     }
 }
