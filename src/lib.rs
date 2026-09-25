@@ -27,7 +27,7 @@ pub use lock::{
 };
 pub use mcp::list_tools;
 pub use pkg::{Package, SourceFile, read_tarball};
-pub use poison::{Severity, Signal, inspect};
+pub use poison::{Severity, Signal, inspect, inspect_output};
 pub use report::{render, render_changes};
 pub use resolve::resolve_command;
 pub use tool::Tool;
