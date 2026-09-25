@@ -19,9 +19,12 @@ const MAX_LINES: usize = 10_000;
 //
 // Windows needs more than PATH. `SystemRoot` is where Win32 finds its own DLLs,
 // and without it the Winsock and crypto initialisers fail, so the process dies
-// on startup instead of reporting anything. None of these leak user data.
+// on startup instead of reporting anything. npm stores its global prefix as the
+// literal `${APPDATA}\npm`, so without `APPDATA` every `npx -y <package>` fails
+// with ENOENT; `LOCALAPPDATA` is where its cache lives. These are paths, not
+// secrets: no token or credential is passed.
 #[cfg(windows)]
-const ALLOWED_ENV: &[&str] = &["PATH", "SYSTEMROOT", "WINDIR"];
+const ALLOWED_ENV: &[&str] = &["PATH", "SYSTEMROOT", "WINDIR", "APPDATA", "LOCALAPPDATA"];
 #[cfg(not(windows))]
 const ALLOWED_ENV: &[&str] = &["PATH"];
 
@@ -195,6 +198,14 @@ mod tests {
         assert!(
             names.iter().any(|n| n.eq_ignore_ascii_case("SYSTEMROOT")),
             "on Windows the child needs SystemRoot, got {names:?}"
+        );
+        // Regression: without APPDATA, npm expands its prefix `${APPDATA}\npm`
+        // literally and `npx -y <package>` dies with ENOENT before the server
+        // starts. `npx --version` does not touch the prefix, so it hid this.
+        #[cfg(windows)]
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("APPDATA")),
+            "on Windows npx needs APPDATA, got {names:?}"
         );
     }
 
