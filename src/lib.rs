@@ -22,7 +22,8 @@ pub use capabilities::{Capability, Evidence, capabilities, scan};
 pub use error::Error;
 pub use launch::Contained;
 pub use lock::{
-    Change, LOCK_VERSION, Lock, Pinned, PinnedTool, canonical, diff, hash_tools, pin, tarball_hash,
+    Change, FieldChange, LOCK_VERSION, Lock, Pinned, PinnedTool, canonical, diff, field_changes,
+    hash_tools, pin, read_lock, tarball_hash,
 };
 pub use mcp::list_tools;
 pub use pkg::{Package, SourceFile, read_tarball};

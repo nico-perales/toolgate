@@ -142,7 +142,7 @@ fn without_tools(pinned: &Pinned) -> Pinned {
 fn load_lock(path: &Path) -> Result<Option<Lock>> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
-            let lock: Lock = serde_json::from_str(&text)
+            let lock = toolgate::read_lock(&text)
                 .with_context(|| format!("{} is not a valid lock file", path.display()))?;
             Ok(Some(lock))
         }

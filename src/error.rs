@@ -19,6 +19,9 @@ pub enum Error {
     #[error("the static pass vetoed the launch: {0}")]
     Vetoed(String),
 
+    #[error("unsupported lock file: {0}")]
+    LockFormat(String),
+
     #[error("i/o error on {path}")]
     Io {
         path: String,

@@ -7,8 +7,10 @@
 
 use std::fmt::Write as _;
 
+use serde_json::Value;
+
 use crate::audit::Audit;
-use crate::lock::Change;
+use crate::lock::{Change, FieldChange};
 use crate::poison::Severity;
 
 /// A readable report for an audit.
@@ -84,6 +86,27 @@ fn one_line(text: &str) -> String {
     format!("{head}… (+{} more characters)", total - MAX)
 }
 
+fn shown(value: Option<&Value>) -> String {
+    match value {
+        None => "(absent)".to_owned(),
+        Some(Value::String(text)) => one_line(text),
+        Some(other) => one_line(&other.to_string()),
+    }
+}
+
+// Text gets a line each for before and after; anything else fits on one.
+fn render_field(out: &mut String, field: &FieldChange) {
+    let (before, after) = (shown(field.before.as_ref()), shown(field.after.as_ref()));
+    let is_text = |v: Option<&Value>| matches!(v, Some(Value::String(_)));
+    if is_text(field.before.as_ref()) || is_text(field.after.as_ref()) {
+        let _ = writeln!(out, "      {}:", field.path);
+        let _ = writeln!(out, "        before: {before}");
+        let _ = writeln!(out, "        after:  {after}");
+    } else {
+        let _ = writeln!(out, "      {}: {before} -> {after}", field.path);
+    }
+}
+
 /// A readable report for a `check`: what changed against the pin.
 ///
 /// There is no heuristic here. Every line is a checkable fact, so all of them
@@ -121,14 +144,11 @@ pub fn render_changes(changes: &[Change]) -> String {
             Change::ToolRemoved(name) => {
                 let _ = writeln!(out, "  ! tool gone: {name}");
             }
-            Change::ToolChanged {
-                name,
-                before,
-                after,
-            } => {
-                let _ = writeln!(out, "  x the description of {name} changed");
-                let _ = writeln!(out, "      before: {}", one_line(before));
-                let _ = writeln!(out, "      after:  {}", one_line(after));
+            Change::ToolChanged { name, fields } => {
+                let _ = writeln!(out, "  x the definition of {name} changed");
+                for field in fields {
+                    render_field(&mut out, field);
+                }
             }
         }
     }
@@ -139,7 +159,8 @@ pub fn render_changes(changes: &[Change]) -> String {
 mod tests {
     use super::{render, render_changes};
     use crate::audit::Audit;
-    use crate::lock::Change;
+    use crate::lock::{Change, FieldChange};
+    use serde_json::Value;
     use std::collections::BTreeMap;
 
     fn empty(vetoed: Option<String>) -> Audit {
@@ -195,14 +216,29 @@ mod tests {
 
     #[test]
     fn a_padded_description_is_shown_on_one_line_and_bounded() {
-        let padding = "x ".repeat(400);
         let text = render_changes(&[Change::ToolChanged {
             name: "q".to_owned(),
-            before: "Read only.".to_owned(),
-            after: padding,
+            fields: vec![FieldChange {
+                path: "description".to_owned(),
+                before: Some(Value::String("Read only.".to_owned())),
+                after: Some(Value::String("x ".repeat(400))),
+            }],
         }]);
         assert!(text.contains("more characters)"));
-        // Four lines: the header, the change headline, the before and the after.
-        assert_eq!(text.lines().count(), 4);
+        // Header, headline, field name, before and after.
+        assert_eq!(text.lines().count(), 5);
+    }
+
+    #[test]
+    fn a_flipped_annotation_is_named_on_one_line() {
+        let text = render_changes(&[Change::ToolChanged {
+            name: "delete_file".to_owned(),
+            fields: vec![FieldChange {
+                path: "annotations.destructiveHint".to_owned(),
+                before: Some(Value::Bool(true)),
+                after: Some(Value::Bool(false)),
+            }],
+        }]);
+        assert!(text.contains("annotations.destructiveHint: true -> false"));
     }
 }

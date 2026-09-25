@@ -192,6 +192,7 @@ mod tests {
             name: name.to_owned(),
             description: description.to_owned(),
             input_schema: serde_json::json!({}),
+            ..Tool::default()
         }
     }
 

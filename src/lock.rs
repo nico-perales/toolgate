@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::error::Error;
 use crate::tool::Tool;
 
 /// A stable shape for a JSON value: sorted keys, no whitespace.
@@ -54,13 +55,18 @@ fn normalise(text: &str) -> String {
     text.replace(char::from(13), "").trim_end().to_owned()
 }
 
+// The definition that gets hashed and stored: every field the server sent, with
+// the description normalised so a CRLF checkout is not a rug pull.
+fn normalised_definition(tool: &Tool) -> Value {
+    let mut value = tool.to_value();
+    if let Some(Value::String(description)) = value.get_mut("description") {
+        *description = normalise(description);
+    }
+    value
+}
+
 fn hash_tool(tool: &Tool) -> String {
-    let value = serde_json::json!({
-        "name": tool.name,
-        "description": normalise(&tool.description),
-        "inputSchema": tool.input_schema,
-    });
-    sha256_hex(canonical(&value).as_bytes())
+    sha256_hex(canonical(&normalised_definition(tool)).as_bytes())
 }
 
 /// Fingerprint of the whole tool set.
@@ -72,7 +78,7 @@ pub fn hash_tools(tools: &[Tool]) -> String {
 }
 
 /// Version of the lock file format.
-pub const LOCK_VERSION: u32 = 1;
+pub const LOCK_VERSION: u32 = 2;
 
 /// Fingerprint of the tarball exactly as npm publishes it.
 ///
@@ -87,8 +93,8 @@ pub fn tarball_hash(bytes: &[u8]) -> String {
 pub struct PinnedTool {
     pub name: String,
     pub hash: String,
-    /// Kept so the report can show before/after, not just "it changed".
-    pub description: String,
+    /// The whole definition, so a change can be shown field by field.
+    pub definition: Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,20 +130,82 @@ impl Lock {
     }
 }
 
+/// Reads a lock file, refusing formats this version does not understand.
+///
+/// A v1 lock hashed only three fields of each tool, so comparing it against a v2
+/// pin would report every tool as changed. An explicit error beats false alarms.
+pub fn read_lock(text: &str) -> Result<Lock, Error> {
+    let value: Value = serde_json::from_str(text).map_err(|e| Error::LockFormat(e.to_string()))?;
+    match value.get("version").and_then(Value::as_u64) {
+        Some(v) if v == u64::from(LOCK_VERSION) => {
+            serde_json::from_value(value).map_err(|e| Error::LockFormat(e.to_string()))
+        }
+        Some(v) => Err(Error::LockFormat(format!(
+            "it uses format v{v} and this toolgate reads v{LOCK_VERSION}; pin it again with `toolgate pin`"
+        ))),
+        None => Err(Error::LockFormat("it has no version field".to_owned())),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     ToolAdded(String),
     ToolRemoved(String),
     ToolChanged {
         name: String,
-        before: String,
-        after: String,
+        fields: Vec<FieldChange>,
     },
     CapabilitiesWidened(Vec<String>),
     PackageChanged {
         before: String,
         after: String,
     },
+}
+
+/// One field that differs between two definitions of the same tool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldChange {
+    /// Dotted path, e.g. `annotations.destructiveHint`.
+    pub path: String,
+    pub before: Option<Value>,
+    pub after: Option<Value>,
+}
+
+/// Every field that differs between two definitions. Objects are compared key
+/// by key; anything else, arrays included, is compared as a whole.
+pub fn field_changes(before: &Value, after: &Value) -> Vec<FieldChange> {
+    let mut out = Vec::new();
+    walk_fields("", before, after, &mut out);
+    out
+}
+
+fn walk_fields(prefix: &str, before: &Value, after: &Value, out: &mut Vec<FieldChange>) {
+    match (before, after) {
+        (Value::Object(b), Value::Object(a)) => {
+            let keys: BTreeSet<&String> = b.keys().chain(a.keys()).collect();
+            for key in keys {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                match (b.get(key), a.get(key)) {
+                    (Some(bv), Some(av)) => walk_fields(&path, bv, av, out),
+                    (bv, av) => out.push(FieldChange {
+                        path,
+                        before: bv.cloned(),
+                        after: av.cloned(),
+                    }),
+                }
+            }
+        }
+        _ if before == after => {}
+        _ => out.push(FieldChange {
+            path: prefix.to_owned(),
+            before: Some(before.clone()),
+            after: Some(after.clone()),
+        }),
+    }
 }
 
 /// Freezes the observed state of a server.
@@ -152,7 +220,7 @@ pub fn pin(package: &str, tarball_sha256: &str, capabilities: &[String], tools: 
             .map(|t| PinnedTool {
                 name: t.name.clone(),
                 hash: hash_tool(t),
-                description: normalise(&t.description),
+                definition: normalised_definition(t),
             })
             .collect(),
     }
@@ -193,8 +261,7 @@ pub fn diff(old: &Pinned, new: &Pinned) -> Vec<Change> {
             Some(old_tool) if old_tool.hash != new_tool.hash => {
                 changes.push(Change::ToolChanged {
                     name: (*name).to_owned(),
-                    before: old_tool.description.clone(),
-                    after: new_tool.description.clone(),
+                    fields: field_changes(&old_tool.definition, &new_tool.definition),
                 });
             }
             Some(_) => {}
@@ -211,7 +278,10 @@ pub fn diff(old: &Pinned, new: &Pinned) -> Vec<Change> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Change, LOCK_VERSION, Lock, canonical, diff, hash_tools, pin, tarball_hash};
+    use super::{
+        Change, FieldChange, LOCK_VERSION, Lock, canonical, diff, field_changes, hash_tools, pin,
+        read_lock, tarball_hash,
+    };
     use crate::tool::Tool;
     use serde_json::json;
 
@@ -220,7 +290,74 @@ mod tests {
             name: name.to_owned(),
             description: description.to_owned(),
             input_schema: json!({"type": "object"}),
+            ..Tool::default()
         }
+    }
+
+    fn with_annotations(description: &str, destructive: bool) -> Tool {
+        let mut t = tool("delete_file", description);
+        t.extra.insert(
+            "annotations".to_owned(),
+            json!({ "destructiveHint": destructive }),
+        );
+        t
+    }
+
+    #[test]
+    fn a_change_only_in_annotations_is_detected_and_named() {
+        // The rug pull the old pin missed: same description, but the client
+        // stops asking for confirmation.
+        let before = pin(
+            "p@1.0.0",
+            "aa",
+            &[],
+            &[with_annotations("Deletes a file.", true)],
+        );
+        let after = pin(
+            "p@1.0.0",
+            "aa",
+            &[],
+            &[with_annotations("Deletes a file.", false)],
+        );
+        let changes = diff(&before, &after);
+        assert_eq!(
+            changes,
+            vec![Change::ToolChanged {
+                name: "delete_file".to_owned(),
+                fields: vec![FieldChange {
+                    path: "annotations.destructiveHint".to_owned(),
+                    before: Some(json!(true)),
+                    after: Some(json!(false)),
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_field_that_appears_is_reported_as_absent_before() {
+        let before = json!({ "name": "q" });
+        let after = json!({ "name": "q", "title": "Query" });
+        assert_eq!(
+            field_changes(&before, &after),
+            vec![FieldChange {
+                path: "title".to_owned(),
+                before: None,
+                after: Some(json!("Query")),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_v1_lock_is_refused_with_a_way_forward() {
+        let v1 = r#"{"version":1,"config":"","servers":{}}"#;
+        let err = read_lock(v1).unwrap_err().to_string();
+        assert!(err.contains("pin it again"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn a_current_lock_is_read() {
+        let text = serde_json::to_string(&Lock::new("cfg")).unwrap();
+        assert_eq!(read_lock(&text).unwrap().version, LOCK_VERSION);
     }
 
     #[test]
