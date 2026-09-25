@@ -6,9 +6,11 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use toolgate::journal::{self, Verdict};
+use toolgate::store;
 use toolgate::{
     Audit, Lock, Pinned, Severity, Signal, audit, diff, escape, pin, render, render_changes,
-    tarball_hash, veto_line,
+    render_review, tarball_hash, veto_line,
 };
 
 #[derive(Parser, Debug)]
@@ -81,6 +83,29 @@ enum Command {
         #[arg(last = true, allow_hyphen_values = true, required = true)]
         launch: Vec<String>,
     },
+
+    /// Show what changed in a server since you approved it, field by field.
+    Review {
+        /// The server's name, as given to `proxy --name`. Without it, lists
+        /// every server with changes waiting.
+        name: Option<String>,
+    },
+
+    /// Approve a server's pending changes. They take effect when your client
+    /// reconnects the server.
+    Accept {
+        /// The server's name, as given to `proxy --name`.
+        name: String,
+        /// Approve critical findings too.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Check the hash chain of a proxy session log.
+    VerifyLog {
+        /// A `.jsonl` file from the logs directory.
+        file: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -115,6 +140,9 @@ fn run() -> Result<ExitCode> {
             name.as_deref(),
             &launch,
         )?)),
+        Command::Review { name } => run_review(name.as_deref()),
+        Command::Accept { name, force } => run_accept(&name, force),
+        Command::VerifyLog { file } => run_verify_log(&file),
     }
 }
 
@@ -321,6 +349,139 @@ fn run_check(
     Ok(ExitCode::from(1))
 }
 
+fn run_review(name: Option<&str>) -> Result<ExitCode> {
+    let home = store::home()?;
+    let Some(name) = name else {
+        return review_all(&home);
+    };
+    let key = store::server_key(Some(name), &[])?;
+    let pin = store::load(&home, &key)?
+        .with_context(|| format!("nothing is pinned for {key} in {}", home.display()))?;
+    print!("{}", render_review(&pin));
+    if pin.pending.is_some() {
+        return Ok(ExitCode::from(1));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+// Every pinned server, and which of them have changes waiting.
+fn review_all(home: &Path) -> Result<ExitCode> {
+    let dir = home.join("pins");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!("No servers pinned yet in {}.", home.display());
+            return Ok(ExitCode::SUCCESS);
+        }
+        Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut keys = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("reading {}", dir.display()))?
+            .path();
+        if path.extension().is_some_and(|e| e == "json") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                keys.push(stem.to_owned());
+            }
+        }
+    }
+    keys.sort();
+    let mut waiting = 0usize;
+    for key in &keys {
+        match store::load(home, key) {
+            Ok(Some(pin)) => {
+                if let Some(pending) = &pin.pending {
+                    waiting += 1;
+                    let count = pending.tools.len() + usize::from(pending.instructions.is_some());
+                    println!(
+                        "  {}: {count} change(s) waiting; run `toolgate review {}`",
+                        escape(key),
+                        escape(key)
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(err) => println!("  ! {}: {err}", escape(key)),
+        }
+    }
+    if waiting == 0 {
+        println!(
+            "Nothing waiting for review ({} server(s) pinned).",
+            keys.len()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    Ok(ExitCode::from(1))
+}
+
+fn run_accept(name: &str, force: bool) -> Result<ExitCode> {
+    let home = store::home()?;
+    let key = store::server_key(Some(name), &[])?;
+    let mut pin = store::load(&home, &key)?
+        .with_context(|| format!("nothing is pinned for {key} in {}", home.display()))?;
+    let accepted = match pin.accept(force) {
+        Ok(accepted) => accepted,
+        Err(err) => {
+            eprintln!("toolgate: {err}");
+            eprintln!("Nothing was approved. Look first: toolgate review {key}");
+            return Ok(ExitCode::from(1));
+        }
+    };
+    if accepted.promoted.is_empty() && accepted.dropped.is_empty() && !accepted.instructions {
+        println!("Nothing waiting for review in {key}.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    store::save(&home, &pin)?;
+    if !accepted.promoted.is_empty() {
+        println!("Approved in {key}: {}", names(&accepted.promoted));
+    }
+    if accepted.instructions {
+        println!("Approved the new instructions of {key}.");
+    }
+    if !accepted.dropped.is_empty() {
+        println!("Dropped, never pinnable: {}", names(&accepted.dropped));
+    }
+    println!("Reconnect the server in your client (for example `/mcp` in Claude Code):");
+    println!("a session already running keeps enforcing the old pin until it restarts.");
+    Ok(ExitCode::SUCCESS)
+}
+
+// Names that came from a server, escaped, on one line.
+fn names(list: &[String]) -> String {
+    list.iter()
+        .map(String::as_str)
+        .map(escape)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn run_verify_log(file: &Path) -> Result<ExitCode> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    match journal::verify(&bytes) {
+        Verdict::Intact { lines, head } => {
+            println!("Intact: {lines} line(s), and the session closed normally.");
+            println!("Head: {head}");
+            println!(
+                "Compare it with the head the session printed to stderr, in your client's logs."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Verdict::Unfinished { lines, head } => {
+            println!("The chain holds for {lines} line(s), but the session never closed.");
+            println!(
+                "That is a crash, a kill, or a cut at the end: a hash chain cannot tell which."
+            );
+            println!("Head: {head}");
+            Ok(ExitCode::from(1))
+        }
+        Verdict::Broken { seq, reason } => {
+            println!("BROKEN at line {seq}: {reason}.");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Cli, Command, server_key};
@@ -405,5 +566,21 @@ mod tests {
     #[test]
     fn proxy_refuses_to_run_without_a_server_command() {
         assert!(Cli::try_parse_from(["toolgate", "proxy"]).is_err());
+    }
+
+    #[test]
+    fn the_offline_commands_parse() {
+        assert!(matches!(
+            parse(&["toolgate", "review"]).command,
+            Command::Review { name: None }
+        ));
+        assert!(matches!(
+            parse(&["toolgate", "accept", "gh", "--force"]).command,
+            Command::Accept { force: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["toolgate", "verify-log", "x.jsonl"]).command,
+            Command::VerifyLog { .. }
+        ));
     }
 }
