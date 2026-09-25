@@ -7,11 +7,13 @@
 #![deny(clippy::print_stdout)]
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::{self, BufRead, Write};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-use crate::lock::sha256_hex;
+use crate::lock::{hex, sha256_hex};
 use crate::policy::{self, CallDecision, Event, Outcome, ServerRequestDecision, Session};
 use crate::store::ServerPin;
 
@@ -437,12 +439,161 @@ fn dropped(reason: &str, bytes: &[u8]) -> Event {
     }
 }
 
+/// One read from a stream of newline-delimited messages.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Frame {
+    /// A line without its newline. A carriage return before it is kept, so
+    /// the line goes out exactly as it came.
+    Line(Vec<u8>),
+    /// A line over the limit: read to its end, but only measured and hashed.
+    Oversized { bytes: usize, sha256: String },
+    /// The stream ended.
+    End,
+}
+
+/// Reads the next line, holding at most `max` bytes of it in memory. A longer
+/// line is read to its end without being kept, so one endless line from a
+/// hostile server cannot exhaust memory.
+pub fn read_frame<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Frame> {
+    let mut line = Vec::new();
+    let mut hasher: Option<Sha256> = None;
+    let mut total = 0usize;
+    let mut started = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            break; // the end: a last line without a newline still counts
+        }
+        started = true;
+        let newline = available.iter().position(|b| *b == b'\n');
+        let chunk = &available[..newline.unwrap_or(available.len())];
+        total += chunk.len();
+        if let Some(running) = hasher.as_mut() {
+            running.update(chunk);
+        } else if total > max {
+            let mut fresh = Sha256::new();
+            fresh.update(&line);
+            fresh.update(chunk);
+            hasher = Some(fresh);
+            line = Vec::new();
+        } else {
+            line.extend_from_slice(chunk);
+        }
+        let used = chunk.len() + usize::from(newline.is_some());
+        reader.consume(used);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if !started {
+        return Ok(Frame::End);
+    }
+    Ok(match hasher {
+        Some(hasher) => Frame::Oversized {
+            bytes: total,
+            sha256: hex(&hasher.finalize()),
+        },
+        None => Frame::Line(line),
+    })
+}
+
+/// One end the relay writes to. Both threads write to both ends, so every
+/// message is written whole, newline and flush included, under one lock: two
+/// messages never interleave.
+pub struct Outlet<W: Write> {
+    inner: Mutex<Option<W>>,
+}
+
+impl<W: Write> Outlet<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            inner: Mutex::new(Some(writer)),
+        }
+    }
+
+    pub fn send(&self, message: &[u8]) -> io::Result<()> {
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(writer) = guard.as_mut() else {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"));
+        };
+        writer.write_all(message)?;
+        writer.write_all(b"\n")?;
+        writer.flush()
+    }
+
+    /// Drops the writer. For the server's stdin, that is the end-of-file that
+    /// tells it to exit.
+    pub fn close(&self) {
+        drop(
+            self.inner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+    }
+
+    pub fn into_inner(self) -> Option<W> {
+        self.inner
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Moves every line from `reader` through `decide`, and writes what it says,
+/// until the reader ends. An error means a write failed: that side is gone.
+pub fn pump<R: BufRead, C: Write, S: Write>(
+    mut reader: R,
+    max: usize,
+    decide: &dyn Fn(&[u8]) -> Step,
+    client: &Outlet<C>,
+    server: &Outlet<S>,
+    record: &dyn Fn(&[Event]),
+) -> io::Result<()> {
+    loop {
+        let step = match read_frame(&mut reader, max)? {
+            Frame::End => return Ok(()),
+            Frame::Oversized { bytes, sha256 } => Step {
+                events: vec![Event::LineDropped {
+                    reason: format!("longer than {max} bytes"),
+                    bytes,
+                    sha256,
+                }],
+                ..Step::default()
+            },
+            Frame::Line(line) => {
+                if line.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                decide(&line)
+            }
+        };
+        // Logged first: if a write fails, the log still says what happened.
+        if !step.events.is_empty() {
+            record(&step.events);
+        }
+        for message in &step.to_server {
+            server.send(message)?;
+        }
+        for message in &step.to_client {
+            client.send(message)?;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_IN_FLIGHT, Relay, Request, Requests, SavePin};
+    use super::{
+        Frame, MAX_IN_FLIGHT, Outlet, Relay, Request, Requests, SavePin, pump, read_frame,
+    };
+    use crate::lock::sha256_hex;
     use crate::policy::{Event, Session, on_tools_list};
     use crate::store::ServerPin;
     use serde_json::{Value, json};
+    use std::io::BufReader;
     use std::sync::{Arc, Mutex};
 
     fn ch(code: u32) -> char {
@@ -830,5 +981,107 @@ mod tests {
         r.from_server(&answer(json!(1), page));
         assert_eq!(r.finish(), vec![Event::Sealed { tools: 1 }]);
         assert!(saved.lock().unwrap().last().unwrap().is_sealed());
+    }
+
+    // --- framing and the pump ---
+
+    // Read through a tiny buffer, so lines always straddle reads.
+    fn frames(input: &[u8], max: usize) -> Vec<Frame> {
+        let mut reader = BufReader::with_capacity(3, input);
+        let mut out = Vec::new();
+        loop {
+            match read_frame(&mut reader, max).unwrap() {
+                Frame::End => return out,
+                frame => out.push(frame),
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_keeps_every_byte_but_its_newline() {
+        assert_eq!(
+            frames(b"a\r\nbc\nlast", 64),
+            vec![
+                Frame::Line(b"a\r".to_vec()),
+                Frame::Line(b"bc".to_vec()),
+                Frame::Line(b"last".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn an_oversized_line_is_measured_and_hashed_but_not_kept() {
+        let long = vec![b'x'; 100];
+        let mut input = long.clone();
+        input.extend_from_slice(b"\nok\n");
+        assert_eq!(
+            frames(&input, 10),
+            vec![
+                Frame::Oversized {
+                    bytes: 100,
+                    sha256: sha256_hex(&long)
+                },
+                Frame::Line(b"ok".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn outlets_write_whole_lines_until_closed() {
+        let open = Outlet::new(Vec::new());
+        open.send(b"one").unwrap();
+        open.send(b"two").unwrap();
+        assert_eq!(open.into_inner().unwrap(), b"one\ntwo\n");
+        let closed = Outlet::new(Vec::new());
+        closed.close();
+        assert!(closed.send(b"late").is_err());
+    }
+
+    #[test]
+    fn the_pump_never_lets_a_blocked_call_reach_the_server() {
+        let r = relay(sealed(&["search"]));
+        let ping = request(json!(2), "ping");
+        let mut input = call(json!(1), "exfiltrate");
+        input.push(b'\n');
+        input.extend_from_slice(&ping);
+        input.push(b'\n');
+        let (client, server) = (Outlet::new(Vec::new()), Outlet::new(Vec::new()));
+        let decide = |l: &[u8]| r.from_client(l);
+        pump(
+            input.as_slice(),
+            usize::MAX,
+            &decide,
+            &client,
+            &server,
+            &|_: &[Event]| {},
+        )
+        .unwrap();
+        let mut expected = ping;
+        expected.push(b'\n');
+        assert_eq!(server.into_inner().unwrap(), expected);
+        let answered = client.into_inner().unwrap();
+        assert_eq!(parse(answered.trim_ascii_end())["id"], 1);
+    }
+
+    #[test]
+    fn the_pump_drops_an_oversized_line_and_carries_on() {
+        let r = asked(learning(), &request(json!(1), "ping"));
+        let reply = answer(json!(1), json!({}));
+        let mut output = vec![b'x'; 100];
+        output.push(b'\n');
+        output.extend_from_slice(&reply);
+        output.push(b'\n');
+        let seen = Mutex::new(Vec::new());
+        let (client, server) = (Outlet::new(Vec::new()), Outlet::new(Vec::new()));
+        let decide = |l: &[u8]| r.from_server(l);
+        let record = |e: &[Event]| seen.lock().unwrap().extend_from_slice(e);
+        pump(output.as_slice(), 64, &decide, &client, &server, &record).unwrap();
+        let mut expected = reply;
+        expected.push(b'\n');
+        assert_eq!(client.into_inner().unwrap(), expected);
+        assert!(matches!(
+            &seen.lock().unwrap()[..],
+            [Event::LineDropped { bytes: 100, .. }]
+        ));
     }
 }

@@ -39,10 +39,14 @@ pub fn canonical(value: &Value) -> String {
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+// Lowercase hex, the way every hash in toolgate's files is written.
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
         out.push(char::from(HEX[(byte >> 4) as usize]));
         out.push(char::from(HEX[(byte & 0x0f) as usize]));
     }
