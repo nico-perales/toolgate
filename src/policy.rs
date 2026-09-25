@@ -616,8 +616,11 @@ fn judge_output(tool: &str, payload: &Value, texts: &[String], what: &str) -> Ou
     }
 }
 
-// Every string in a value, except base64 payloads (`data`, `blob`): images,
-// audio and binary resources, not text the model reads.
+// Every string in a value, except the base64 payloads of binary content: `data`
+// in an image or audio item, and `blob` in an embedded resource. The exemption
+// is decided by position, never by key name alone: a key called `data`
+// anywhere else is ordinary text, and skipping it would let a server hide
+// anything under that name.
 fn collect_strings(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(text) => out.push(text.clone()),
@@ -627,8 +630,14 @@ fn collect_strings(value: &Value, out: &mut Vec<String>) {
             }
         }
         Value::Object(map) => {
+            let binary_item = matches!(
+                map.get("type").and_then(Value::as_str),
+                Some("image" | "audio")
+            );
+            let resource = map.contains_key("uri");
             for (key, item) in map {
-                if key != "data" && key != "blob" {
+                let base64 = (key == "data" && binary_item) || (key == "blob" && resource);
+                if !base64 {
                     collect_strings(item, out);
                 }
             }
@@ -1107,5 +1116,25 @@ mod tests {
             on_server_request("ping", &json!({})),
             ServerRequestDecision::Forward(Vec::new())
         );
+    }
+
+    #[test]
+    fn a_key_named_data_elsewhere_is_still_read() {
+        // Regression: the base64 exemption skipped every `data` key at any depth,
+        // so a server could hide text under that name.
+        let result =
+            json!({ "content": [], "structuredContent": { "data": { "note": tags("hidden") } } });
+        assert!(on_tool_result("api", &result).replacement.is_some());
+        let error =
+            json!({ "code": -32000, "message": "Failed.", "data": { "data": tags("hidden") } });
+        assert!(on_error("api", &error).replacement.is_some());
+    }
+
+    #[test]
+    fn an_embedded_resource_blob_is_not_read_as_text() {
+        let result = json!({ "content": [{ "type": "resource", "resource": {
+            "uri": "file:///x.bin", "mimeType": "application/octet-stream", "blob": tags("not text")
+        } }] });
+        assert_eq!(on_tool_result("files", &result).replacement, None);
     }
 }
