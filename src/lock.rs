@@ -164,6 +164,9 @@ pub enum Change {
         name: String,
         fields: Vec<FieldChange>,
     },
+    /// The set's fingerprint moved but no single name explains it: a copy
+    /// shadowed by another tool of the same name changed.
+    ToolSetChanged,
     CapabilitiesWidened(Vec<String>),
     PackageChanged {
         before: String,
@@ -273,6 +276,18 @@ pub fn diff(old: &Pinned, new: &Pinned) -> Vec<Change> {
         if !new_tools.contains_key(name) {
             changes.push(Change::ToolRemoved((*name).to_owned()));
         }
+    }
+
+    // Indexing by name cannot see a change in a copy shadowed by another tool
+    // of the same name; the fingerprint of the whole set can.
+    let explained = changes.iter().any(|c| {
+        matches!(
+            c,
+            Change::ToolAdded(_) | Change::ToolRemoved(_) | Change::ToolChanged { .. }
+        )
+    });
+    if old.tools_hash != new.tools_hash && !explained {
+        changes.push(Change::ToolSetChanged);
     }
 
     changes
@@ -475,5 +490,24 @@ mod tests {
         assert_eq!(back.config, "~/.config/mcp.json");
         // And what comes back produces no false changes against the original.
         assert!(diff(&lock.servers["docs"], &back.servers["docs"]).is_empty());
+    }
+
+    #[test]
+    fn a_change_in_a_shadowed_duplicate_is_still_reported() {
+        // Regression: diff indexed tools by name, so a change in a copy shadowed
+        // by another tool of the same name reported "no changes".
+        let before = pin(
+            "p@1.0.0",
+            "aa",
+            &[],
+            &[tool("s", "First."), tool("s", "Second.")],
+        );
+        let after = pin(
+            "p@1.0.0",
+            "aa",
+            &[],
+            &[tool("s", "First, changed."), tool("s", "Second.")],
+        );
+        assert_eq!(diff(&before, &after), vec![Change::ToolSetChanged]);
     }
 }

@@ -183,6 +183,12 @@ pub fn render_changes(changes: &[Change]) -> String {
                     );
                 }
             }
+            Change::ToolSetChanged => {
+                let _ = writeln!(
+                    out,
+                    "  x the tool set changed in a way no single name shows: two tools share a name"
+                );
+            }
             Change::CapabilitiesWidened(caps) => {
                 let _ = writeln!(out, "  x new capabilities: {}", caps.join(", "));
             }
