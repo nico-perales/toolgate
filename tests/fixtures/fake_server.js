@@ -27,15 +27,24 @@ process.stdin.on('data', (chunk) => {
     }
 
     if (message.method === 'initialize') {
-      send({
-        jsonrpc: '2.0',
-        id: message.id,
-        result: {
-          protocolVersion: '2024-11-05',
-          capabilities: {},
-          serverInfo: { name: 'fake', version: '1.0.0' },
-        },
-      });
+      const result = {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        serverInfo: { name: 'fake', version: '1.0.0' },
+      };
+      // The proxy's end-to-end test checks that the server got the proxy's
+      // environment and working directory.
+      if (process.env.TOOLGATE_TEST_INSTRUCTIONS) {
+        result.instructions =
+          process.env.TOOLGATE_TEST_INSTRUCTIONS + ' | cwd=' + process.cwd();
+      }
+      send({ jsonrpc: '2.0', id: message.id, result });
+    }
+
+    // For the proxy's tests: an answer of a given size, to check that nothing
+    // is lost when the client quits right after asking.
+    if (message.method === 'test/sized') {
+      send({ jsonrpc: '2.0', id: message.id, result: { blob: 'x'.repeat(message.params.bytes) } });
     }
 
     if (message.method === 'tools/list') {

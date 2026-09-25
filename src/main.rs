@@ -68,6 +68,19 @@ enum Command {
         #[arg(last = true, allow_hyphen_values = true, required = true)]
         launch: Vec<String>,
     },
+
+    /// Run an MCP server behind toolgate: pin what it declares on first use,
+    /// block what changes until you review it, and block hidden text in what
+    /// its tools return.
+    Proxy {
+        /// Name to store the pin under. Defaults to one derived from the whole
+        /// command, so changing an argument starts over.
+        #[arg(long)]
+        name: Option<String>,
+        /// After `--`, the command that starts the server.
+        #[arg(last = true, allow_hyphen_values = true, required = true)]
+        launch: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -98,6 +111,10 @@ fn run() -> Result<ExitCode> {
             lock,
             name,
         } => run_check(&tarball, &launch, &lock, name),
+        Command::Proxy { name, launch } => Ok(ExitCode::from(toolgate::proxy::run(
+            name.as_deref(),
+            &launch,
+        )?)),
     }
 }
 
@@ -369,5 +386,24 @@ mod tests {
         assert_eq!(server_key("docs-mcp@1.4.0"), "docs-mcp");
         // With no version there is nothing to strip.
         assert_eq!(server_key("@acme/docs-mcp"), "@acme/docs-mcp");
+    }
+
+    #[test]
+    fn proxy_keeps_the_server_command_after_the_separator() {
+        let cli = parse(&[
+            "toolgate", "proxy", "--name", "gh", "--", "npx", "-y", "@x/gh", "--name", "inner",
+        ]);
+        match cli.command {
+            Command::Proxy { name, launch } => {
+                assert_eq!(name.as_deref(), Some("gh"));
+                assert_eq!(launch, ["npx", "-y", "@x/gh", "--name", "inner"]);
+            }
+            other => panic!("expected Proxy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proxy_refuses_to_run_without_a_server_command() {
+        assert!(Cli::try_parse_from(["toolgate", "proxy"]).is_err());
     }
 }

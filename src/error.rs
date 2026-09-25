@@ -25,6 +25,9 @@ pub enum Error {
     #[error("pin store: {0}")]
     Pin(String),
 
+    #[error("proxy: {0}")]
+    Proxy(String),
+
     #[error("i/o error on {path}")]
     Io {
         path: String,
