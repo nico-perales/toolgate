@@ -15,6 +15,7 @@ mod pkg;
 mod poison;
 mod report;
 mod resolve;
+pub mod store;
 mod tool;
 
 pub use audit::{Audit, audit};

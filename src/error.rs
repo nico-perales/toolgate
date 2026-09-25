@@ -22,6 +22,9 @@ pub enum Error {
     #[error("unsupported lock file: {0}")]
     LockFormat(String),
 
+    #[error("pin store: {0}")]
+    Pin(String),
+
     #[error("i/o error on {path}")]
     Io {
         path: String,
