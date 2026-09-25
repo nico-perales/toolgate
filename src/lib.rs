@@ -8,6 +8,7 @@
 mod audit;
 mod capabilities;
 mod error;
+pub mod journal;
 mod launch;
 mod lock;
 mod mcp;
