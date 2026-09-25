@@ -42,7 +42,7 @@ impl Contained {
 
         // Minimal environment: it inherits neither your variables nor your
         // credentials, only what the platform needs to start a process at all.
-        let mut builder = Command::new(command);
+        let mut builder = Command::new(crate::resolve::resolve_command(command));
         builder.args(args).env_clear();
         for name in ALLOWED_ENV {
             if let Ok(value) = std::env::var(name) {
@@ -195,6 +195,25 @@ mod tests {
         assert!(
             names.iter().any(|n| n.eq_ignore_ascii_case("SYSTEMROOT")),
             "on Windows the child needs SystemRoot, got {names:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_npx_is_launched_through_its_cmd_shim() {
+        // Regression: `Command::new("npx")` failed on Windows because npm installs
+        // `npx.cmd` and Rust only tries `.exe`. It is what `audit -- npx -y …` runs.
+        if Contained::spawn("node", &["--version".to_owned()]).is_err() {
+            return; // without Node installed, skip
+        }
+        let mut server = Contained::spawn("npx", &["--version".to_owned()])
+            .expect("with Node installed, npx must launch");
+        let line = server
+            .recv_line(Duration::from_secs(60))
+            .expect("npx prints its version");
+        assert!(
+            line.trim().starts_with(|c: char| c.is_ascii_digit()),
+            "unexpected output: {line:?}"
         );
     }
 }
