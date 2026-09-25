@@ -15,6 +15,7 @@ mod mcp;
 mod pkg;
 mod poison;
 pub mod policy;
+pub mod relay;
 mod report;
 mod resolve;
 pub mod store;

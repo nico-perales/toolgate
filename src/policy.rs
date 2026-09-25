@@ -67,6 +67,23 @@ pub enum Event {
         kind: String,
         detail: String,
     },
+    /// The protocol era the client speaks, from its first requests. Only
+    /// logged: no decision depends on it.
+    Era {
+        era: String,
+    },
+    /// A message from the server that was not passed on, with its size and
+    /// hash.
+    LineDropped {
+        reason: String,
+        bytes: usize,
+        sha256: String,
+    },
+    /// The oldest request waiting for an answer was forgotten, to bound
+    /// memory. An answer to it, if one ever comes, is dropped as unknown.
+    RequestEvicted {
+        method: String,
+    },
 }
 
 /// What to do with one message from the server.
