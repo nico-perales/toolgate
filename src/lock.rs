@@ -38,7 +38,7 @@ pub fn canonical(value: &Value) -> String {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
@@ -51,7 +51,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 // Carriage returns are stripped before hashing: a CRLF checkout must not look
 // like a rug pull.
-fn normalise(text: &str) -> String {
+pub(crate) fn normalise(text: &str) -> String {
     text.replace(char::from(13), "").trim_end().to_owned()
 }
 
@@ -67,6 +67,15 @@ fn normalised_definition(tool: &Tool) -> Value {
 
 fn hash_tool(tool: &Tool) -> String {
     sha256_hex(canonical(&normalised_definition(tool)).as_bytes())
+}
+
+/// The pinned form of a tool: its hash and its normalised definition.
+pub(crate) fn pinned_tool(tool: &Tool) -> PinnedTool {
+    PinnedTool {
+        name: tool.name.clone(),
+        hash: hash_tool(tool),
+        definition: normalised_definition(tool),
+    }
 }
 
 /// Fingerprint of the whole tool set.
@@ -215,14 +224,7 @@ pub fn pin(package: &str, tarball_sha256: &str, capabilities: &[String], tools: 
         tarball_sha256: tarball_sha256.to_owned(),
         capabilities: capabilities.to_vec(),
         tools_hash: hash_tools(tools),
-        tools: tools
-            .iter()
-            .map(|t| PinnedTool {
-                name: t.name.clone(),
-                hash: hash_tool(t),
-                definition: normalised_definition(t),
-            })
-            .collect(),
+        tools: tools.iter().map(pinned_tool).collect(),
     }
 }
 
