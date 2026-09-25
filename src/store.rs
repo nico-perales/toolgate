@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -324,7 +326,17 @@ pub fn load(home: &Path, key: &str) -> Result<Option<ServerPin>, Error> {
     let value: Value = serde_json::from_str(&text).map_err(corrupt)?;
     match value.get("version").and_then(Value::as_u64) {
         Some(v) if v == u64::from(PIN_VERSION) => {
-            serde_json::from_value(value).map(Some).map_err(corrupt)
+            let pin: ServerPin = serde_json::from_value(value).map_err(corrupt)?;
+            // `save` writes to the path `server` names, so a copied or edited
+            // file whose `server` disagrees with its name would redirect writes.
+            if pin.server != key {
+                return Err(Error::Pin(format!(
+                    "{} belongs to server {:?}, not {key:?}",
+                    path.display(),
+                    pin.server
+                )));
+            }
+            Ok(Some(pin))
         }
         Some(v) => Err(Error::Pin(format!(
             "{} uses pin format v{v}; this toolgate reads v{PIN_VERSION}",
@@ -337,17 +349,35 @@ pub fn load(home: &Path, key: &str) -> Result<Option<ServerPin>, Error> {
     }
 }
 
-/// Writes a server's pin atomically: to a temporary file, then renamed over the
-/// real one, so a crash never leaves half a pin behind.
+// Saves from one process are serialised: the temporary file is named after the
+// process, so two threads writing at once would otherwise race on it.
+static SAVE: Mutex<()> = Mutex::new(());
+
+/// Writes a server's pin atomically and durably: to a temporary file flushed to
+/// disk, then renamed over the real one, so a crash never leaves half a pin
+/// behind.
 pub fn save(home: &Path, pin: &ServerPin) -> Result<(), Error> {
+    // The file name comes from `server`: refuse anything that is not a valid
+    // key, so a pin can never be written outside the pins directory.
+    server_key(Some(&pin.server), &[])?;
+    let _guard = SAVE.lock().unwrap_or_else(PoisonError::into_inner);
     let path = pin_path(home, &pin.server);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(io_error(dir))?;
     }
     let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
     let text = serde_json::to_string_pretty(pin).map_err(|e| Error::Pin(e.to_string()))?;
-    std::fs::write(&tmp, text).map_err(io_error(&tmp))?;
+    write_durably(&tmp, text.as_bytes())?;
     rename_with_retries(&tmp, &path)
+}
+
+// Flushed to disk before the rename: on filesystems that delay allocation, a
+// crash right after renaming an unflushed file can leave it empty, and an
+// empty pin makes the proxy refuse to start.
+fn write_durably(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let mut file = std::fs::File::create(path).map_err(io_error(path))?;
+    file.write_all(bytes).map_err(io_error(path))?;
+    file.sync_all().map_err(io_error(path))
 }
 
 fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
@@ -560,6 +590,51 @@ mod tests {
     fn saving_leaves_no_temporary_file() {
         let home = temp_home("tmp");
         save(&home, &ServerPin::new("docs", &[])).unwrap();
+        let names: Vec<String> = std::fs::read_dir(home.join("pins"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["docs.json"]);
+    }
+
+    #[test]
+    fn a_pin_whose_server_does_not_match_its_file_is_refused() {
+        // Regression: load trusted the file's `server`, and save writes to the
+        // path that field names, so a copied or edited pin redirected writes.
+        let home = temp_home("mismatch");
+        save(&home, &ServerPin::new("github", &[])).unwrap();
+        std::fs::copy(pin_path(&home, "github"), pin_path(&home, "github-work")).unwrap();
+        assert!(load(&home, "github-work").is_err());
+    }
+
+    #[test]
+    fn a_server_name_that_escapes_the_pins_directory_is_refused() {
+        let home = temp_home("traversal");
+        assert!(save(&home, &ServerPin::new("../evil", &[])).is_err());
+        assert!(!home.join("evil.json").exists());
+    }
+
+    #[test]
+    fn concurrent_saves_in_one_process_do_not_collide() {
+        // Regression: the temporary name was unique per process, not per write,
+        // so the relay's two threads saving at once raced on the same file.
+        let home = temp_home("concurrent");
+        let threads: Vec<_> = (0..4)
+            .map(|i| {
+                let home = home.clone();
+                std::thread::spawn(move || {
+                    let mut p = ServerPin::new("docs", &[]);
+                    for n in 0..10 {
+                        p.note_pending_tool("a", entry(PendingKind::New), i * 100 + n);
+                        save(&home, &p).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert!(load(&home, "docs").unwrap().is_some());
         let names: Vec<String> = std::fs::read_dir(home.join("pins"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
