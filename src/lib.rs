@@ -13,6 +13,7 @@ mod lock;
 mod mcp;
 mod pkg;
 mod poison;
+pub mod policy;
 mod report;
 mod resolve;
 pub mod store;
