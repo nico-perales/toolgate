@@ -6,6 +6,9 @@
 //! atomically.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -229,10 +232,160 @@ impl ServerPin {
     }
 }
 
+/// Where the proxy keeps its files: `TOOLGATE_HOME`, or `.toolgate` in the
+/// user's profile. The proxy gets the client's environment, so the profile
+/// variable is there.
+pub fn home() -> Result<PathBuf, Error> {
+    let profile = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    home_from(std::env::var_os("TOOLGATE_HOME"), std::env::var_os(profile)).ok_or_else(|| {
+        Error::Pin(format!(
+            "neither TOOLGATE_HOME nor {profile} is set; set TOOLGATE_HOME"
+        ))
+    })
+}
+
+// The pure core of `home`, so the precedence can be tested without touching
+// the environment.
+fn home_from(explicit: Option<OsString>, profile: Option<OsString>) -> Option<PathBuf> {
+    explicit
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            profile
+                .filter(|v| !v.is_empty())
+                .map(|p| PathBuf::from(p).join(".toolgate"))
+        })
+}
+
+/// The name a server's pin is stored under: `--name` if given, otherwise one
+/// derived from the launch command. **Never** from what the server reports
+/// about itself: a malicious update could rename itself to get a fresh first use.
+pub fn server_key(name: Option<&str>, command: &[String]) -> Result<String, Error> {
+    let Some(name) = name else {
+        return Ok(derived_key(command));
+    };
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(name.to_owned())
+    } else {
+        Err(Error::Pin(format!(
+            "invalid server name {name:?}: use 1 to 64 of A-Z a-z 0-9 . _ -"
+        )))
+    }
+}
+
+// The command's file stem plus a digest of the whole command line, so two
+// servers launched through the same program get different keys.
+fn derived_key(command: &[String]) -> String {
+    let stem = command
+        .first()
+        .and_then(|c| Path::new(c).file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("server");
+    let slug: String = stem
+        .chars()
+        .take(48)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let digest = sha256_hex(command.join("\0").as_bytes());
+    format!("{slug}-{}", &digest[..8])
+}
+
+pub fn pin_path(home: &Path, key: &str) -> PathBuf {
+    home.join("pins").join(format!("{key}.json"))
+}
+
+/// Reads a server's pin. A missing file means first use. A file that cannot be
+/// read, or that is corrupt, is an **error**: starting over silently would
+/// reopen the trust-on-first-use window.
+pub fn load(home: &Path, key: &str) -> Result<Option<ServerPin>, Error> {
+    let path = pin_path(home, key);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(Error::Io {
+                path: path.display().to_string(),
+                source: e,
+            });
+        }
+    };
+    let corrupt = |e: serde_json::Error| Error::Pin(format!("{} is corrupt: {e}", path.display()));
+    let value: Value = serde_json::from_str(&text).map_err(corrupt)?;
+    match value.get("version").and_then(Value::as_u64) {
+        Some(v) if v == u64::from(PIN_VERSION) => {
+            serde_json::from_value(value).map(Some).map_err(corrupt)
+        }
+        Some(v) => Err(Error::Pin(format!(
+            "{} uses pin format v{v}; this toolgate reads v{PIN_VERSION}",
+            path.display()
+        ))),
+        None => Err(Error::Pin(format!(
+            "{} has no version; this toolgate reads v{PIN_VERSION}",
+            path.display()
+        ))),
+    }
+}
+
+/// Writes a server's pin atomically: to a temporary file, then renamed over the
+/// real one, so a crash never leaves half a pin behind.
+pub fn save(home: &Path, pin: &ServerPin) -> Result<(), Error> {
+    let path = pin_path(home, &pin.server);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(io_error(dir))?;
+    }
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let text = serde_json::to_string_pretty(pin).map_err(|e| Error::Pin(e.to_string()))?;
+    std::fs::write(&tmp, text).map_err(io_error(&tmp))?;
+    rename_with_retries(&tmp, &path)
+}
+
+fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
+    move |source| Error::Io {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+// On Windows a rename fails while another process has the target open; a few
+// short retries ride out a concurrent session reading its pin.
+fn rename_with_retries(from: &Path, to: &Path) -> Result<(), Error> {
+    let mut last = None;
+    for _ in 0..5 {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    let _ = std::fs::remove_file(from);
+    Err(Error::Io {
+        path: to.display().to_string(),
+        source: last.unwrap_or_else(|| std::io::Error::other("rename failed")),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PendingKind, PendingText, PendingTool, PinState, PinnedText, ServerPin};
+    use super::{
+        PendingKind, PendingText, PendingTool, PinState, PinnedText, ServerPin, home_from, load,
+        pin_path, save, server_key,
+    };
     use serde_json::json;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn pin() -> ServerPin {
         ServerPin::new("docs", &["node".to_owned()])
@@ -315,5 +468,102 @@ mod tests {
         p.note_pending_tool("a", entry(PendingKind::New), 1);
         p.clear_pending_tool("a");
         assert!(p.pending.is_none());
+    }
+
+    // A fresh, empty directory per test, so parallel tests never share state.
+    fn temp_home(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("toolgate-store-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn home_prefers_the_explicit_variable() {
+        let profile = Some(OsString::from("/users/me"));
+        let default = Some(PathBuf::from("/users/me").join(".toolgate"));
+        assert_eq!(
+            home_from(Some(OsString::from("/custom")), profile.clone()),
+            Some(PathBuf::from("/custom"))
+        );
+        assert_eq!(home_from(Some(OsString::new()), profile.clone()), default);
+        assert_eq!(home_from(None, profile), default);
+        assert_eq!(home_from(None, None), None);
+    }
+
+    #[test]
+    fn a_given_name_is_validated() {
+        assert_eq!(
+            server_key(Some("github.v2_x-1"), &[]).unwrap(),
+            "github.v2_x-1"
+        );
+        let long = "x".repeat(65);
+        for bad in ["", "a/b", "../x", "with space", long.as_str()] {
+            assert!(
+                server_key(Some(bad), &[]).is_err(),
+                "{bad:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_derived_key_is_stable_and_depends_on_every_argument() {
+        let cmd = |args: &[&str]| args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let key = server_key(None, &cmd(&["/usr/bin/npx", "-y", "@acme/docs"])).unwrap();
+        assert!(
+            key.starts_with("npx-") && key.len() == "npx-".len() + 8,
+            "{key}"
+        );
+        assert_eq!(
+            key,
+            server_key(None, &cmd(&["/usr/bin/npx", "-y", "@acme/docs"])).unwrap()
+        );
+        assert_ne!(
+            key,
+            server_key(None, &cmd(&["/usr/bin/npx", "-y", "@acme/other"])).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_pin_survives_a_round_trip() {
+        let home = temp_home("roundtrip");
+        let mut p = ServerPin::new("docs", &["node".to_owned()]);
+        p.seal();
+        p.note_pending_tool("a", entry(PendingKind::New), 7);
+        save(&home, &p).unwrap();
+        assert_eq!(load(&home, "docs").unwrap(), Some(p));
+    }
+
+    #[test]
+    fn a_missing_pin_means_first_use() {
+        assert_eq!(load(&temp_home("missing"), "docs").unwrap(), None);
+    }
+
+    #[test]
+    fn a_corrupt_pin_is_an_error_not_a_fresh_start() {
+        // Starting over would silently reopen the trust-on-first-use window.
+        let home = temp_home("corrupt");
+        std::fs::create_dir_all(home.join("pins")).unwrap();
+        std::fs::write(pin_path(&home, "docs"), "{ not json").unwrap();
+        assert!(load(&home, "docs").is_err());
+    }
+
+    #[test]
+    fn an_unknown_pin_version_is_an_error() {
+        let home = temp_home("version");
+        std::fs::create_dir_all(home.join("pins")).unwrap();
+        std::fs::write(pin_path(&home, "docs"), r#"{"version":99}"#).unwrap();
+        assert!(load(&home, "docs").unwrap_err().to_string().contains("v1"));
+    }
+
+    #[test]
+    fn saving_leaves_no_temporary_file() {
+        let home = temp_home("tmp");
+        save(&home, &ServerPin::new("docs", &[])).unwrap();
+        let names: Vec<String> = std::fs::read_dir(home.join("pins"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["docs.json"]);
     }
 }
