@@ -32,6 +32,28 @@ jobs:
       - name: Build library without default features
         run: cargo build --lib --no-default-features --locked
 
+  # The proxy in front of the official reference servers. A job of its own:
+  # it needs the network and npm, and a failure there must not hide a failure
+  # in the tests above.
+  interop:
+    name: Interop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Node must be present
+        run: node --version
+      # One at a time: parallel npx installs of the same package race in the
+      # npm cache.
+      - name: The proxy against the official reference servers
+        run: cargo test --locked --test interop -- --ignored --test-threads=1
+
+
   lint:
     name: Format & Clippy
     runs-on: ubuntu-latest
