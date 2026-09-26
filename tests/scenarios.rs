@@ -338,3 +338,62 @@ fn a_modern_sampling_request_is_inspected_where_it_travels() {
     assert!(blocked(&asked), "{asked}");
     s.close();
 }
+
+// --- servers that break the protocol ---
+
+#[test]
+fn lines_that_are_not_json_never_reach_the_client() {
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("noisy");
+    let mut s = Session::open(&home, Era::Legacy, "noisy");
+    assert_eq!(s.list(10).len(), 5);
+    assert!(!blocked(&s.call("read_file", json!({}))));
+    // The client's own reader panics on anything that is not JSON.
+    s.close();
+    assert!(log_events(&home, SERVER).contains(&"line_dropped".to_owned()));
+}
+
+#[test]
+fn a_listing_that_never_ends_is_sealed_when_the_session_ends() {
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("endless");
+    let mut s = Session::open(&home, Era::Legacy, "endless");
+    assert_eq!(names(&s.list(2)), ["tool_0", "tool_1"]);
+    s.close();
+    let pin = toolgate::store::load(&home, SERVER).unwrap().unwrap();
+    assert!(pin.is_sealed());
+
+    // What the first session never saw is new, and held back.
+    let mut s = Session::open(&home, Era::Legacy, "endless");
+    assert_eq!(names(&s.list(3)), ["tool_0", "tool_1"]);
+    assert!(blocked(&s.call("tool_2", json!({}))));
+    s.close();
+}
+
+#[test]
+fn a_name_listed_twice_cannot_be_called_and_its_repeat_is_hidden() {
+    // A page already sent cannot be taken back: the first read_file reached
+    // the client before the second page showed the repeat. What the proxy can
+    // do, it does: the repeat never reaches the client, and the name, whichever
+    // copy the model saw, cannot be called.
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("duplicates");
+    let mut s = Session::open(&home, Era::Legacy, "duplicates");
+    let tools = s.list(10);
+    let copies = tools.iter().filter(|t| t["name"] == "read_file").count();
+    assert_eq!(copies, 1, "{tools:?}");
+    assert!(
+        !tools
+            .iter()
+            .any(|t| t["description"] == "Reads a file, and more.")
+    );
+    assert!(blocked(&s.call("read_file", json!({}))));
+    s.close();
+    assert!(!traced(&home, "tools/call read_file"));
+}
