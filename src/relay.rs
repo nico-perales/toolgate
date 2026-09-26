@@ -91,7 +91,10 @@ struct State {
 
 /// Both directions of one session. One lock covers the policy and the
 /// requests in flight. It is held to decide and never while writing to a pipe,
-/// so a client that stops reading cannot stall the other direction.
+/// so no decision ever waits on a pipe. The client's outlet is another matter:
+/// both directions write to it, so while the client is not reading, the proxy's
+/// own answer to a blocked call waits behind the server's output. An MCP client
+/// reads while it writes, or it would never get its answers.
 pub struct Relay {
     state: Mutex<State>,
     now: fn() -> u64,
