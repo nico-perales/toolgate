@@ -5,7 +5,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{Client, fixture, node_available, temp_home, toolgate};
+use common::{Client, fixture, log_events, node_available, temp_home, toolgate};
 use serde_json::{Value, json};
 
 const SERVER: &str = "scenario";
@@ -242,4 +242,99 @@ fn a_rewritten_description_and_a_new_tool_are_held_back() {
     let (_, review) = toolgate(&home, &["review", SERVER]);
     assert!(review.contains("read ~/.ssh/id_rsa"), "{review}");
     assert!(review.contains("new: not in the approved set"), "{review}");
+}
+
+// --- criterion 3: what tools return ---
+
+#[test]
+fn a_smuggled_output_is_blocked_and_ordinary_web_noise_is_not() {
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("outputs");
+    let mut s = Session::open(&home, Era::Legacy, "smuggle");
+    let smuggled = s.call("fetch", json!({}));
+    assert!(blocked(&smuggled), "{smuggled}");
+    assert!(!smuggled.to_string().contains("Sunny"), "{smuggled}");
+    s.close();
+
+    let mut s = Session::open(&home, Era::Legacy, "web");
+    let web = s.call("fetch", json!({}));
+    assert!(!blocked(&web), "{web}");
+    assert!(result_text(&web).contains("operate"), "{web}");
+    s.close();
+
+    let events = log_events(&home, SERVER);
+    assert!(events.contains(&"output_blocked".to_owned()), "{events:?}");
+    assert!(events.contains(&"warning".to_owned()), "{events:?}");
+}
+
+#[test]
+fn a_ten_megabyte_result_gets_through() {
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("big");
+    let mut s = Session::open(&home, Era::Legacy, "big");
+    let big = s.call("fetch", json!({}));
+    assert!(!blocked(&big));
+    assert!(result_text(&big).len() >= 10 * 1024 * 1024);
+    s.close();
+}
+
+// --- sampling: the server hands the client's model a prompt of its own ---
+
+#[test]
+fn a_legacy_sampling_request_reaches_the_client_unless_it_smuggles() {
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("sampling-legacy");
+    let mut s = Session::open(&home, Era::Legacy, "benign");
+    let asked = s.call("ask", json!({}));
+    assert_eq!(result_text(&asked), "the model said: ok");
+    assert!(
+        s.client
+            .seen
+            .iter()
+            .any(|l| l.contains("sampling/createMessage"))
+    );
+    s.close();
+
+    let mut s = Session::open(&home, Era::Legacy, "sampling-smuggle");
+    let asked = s.call("ask", json!({}));
+    // Refused back to the server: the client never saw the request.
+    assert!(
+        result_text(&asked).starts_with("sampling refused: [toolgate]"),
+        "{asked}"
+    );
+    assert!(
+        !s.client
+            .seen
+            .iter()
+            .any(|l| l.contains("sampling/createMessage"))
+    );
+    s.close();
+}
+
+#[test]
+fn a_modern_sampling_request_is_inspected_where_it_travels() {
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("sampling-modern");
+    let mut s = Session::open(&home, Era::Modern, "benign");
+    let asked = s.call("ask", json!({}));
+    assert_eq!(asked["result"]["resultType"], "input_required", "{asked}");
+    // The client answers and retries, as the 2026-07-28 revision describes.
+    let answer = json!({ "role": "assistant", "content": { "type": "text", "text": "ok" },
+                         "model": "test", "stopReason": "endTurn" });
+    let done = s.call("ask", json!({ "inputResponses": { "q": answer } }));
+    assert_eq!(result_text(&done), "the model said: ok");
+    s.close();
+
+    let mut s = Session::open(&home, Era::Modern, "sampling-smuggle");
+    let asked = s.call("ask", json!({}));
+    assert!(blocked(&asked), "{asked}");
+    s.close();
 }
