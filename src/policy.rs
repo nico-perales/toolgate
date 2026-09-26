@@ -545,10 +545,12 @@ pub fn blocked_result(message: &str) -> Value {
 
 /// A `tools/call` result. Only hidden-text techniques block; everything else
 /// is logged, because it is normal in the web content tools return.
+///
+/// Everything a client could show is inspected, whatever `resultType` says: a
+/// client of the 2025-11-25 era does not know that field, and reads `content`
+/// even in an `input_required` result.
 pub fn on_tool_result(tool: &str, result: &Value) -> Outcome {
-    if result.get("resultType").and_then(Value::as_str) == Some("input_required") {
-        return on_input_required(tool, result);
-    }
+    let mut events = Vec::new();
     let mut texts = Vec::new();
     if let Some(content) = result.get("content") {
         collect_strings(content, &mut texts);
@@ -556,14 +558,23 @@ pub fn on_tool_result(tool: &str, result: &Value) -> Outcome {
     if let Some(structured) = result.get("structuredContent") {
         collect_strings(structured, &mut texts);
     }
-    judge_output(tool, result, &texts, "the output")
+    if result.get("resultType").and_then(Value::as_str) == Some("input_required") {
+        note_input_requests(tool, result, &mut events, &mut texts);
+    }
+    let mut judged = judge_output(tool, result, &texts, "the output");
+    events.append(&mut judged.events);
+    judged.events = events;
+    judged
 }
 
 // A server asking the client for something in the middle of a call. Sampling is
 // the one that matters: the server hands the client's model a prompt of its own.
-fn on_input_required(tool: &str, result: &Value) -> Outcome {
-    let mut events = Vec::new();
-    let mut texts = Vec::new();
+fn note_input_requests(
+    tool: &str,
+    result: &Value,
+    events: &mut Vec<Event>,
+    texts: &mut Vec<String>,
+) {
     if let Some(requests) = result.get("inputRequests").and_then(Value::as_object) {
         for request in requests.values() {
             let method = request
@@ -575,7 +586,7 @@ fn on_input_required(tool: &str, result: &Value) -> Outcome {
                     tool: Some(tool.to_owned()),
                 });
                 if let Some(params) = request.get("params") {
-                    collect_strings(params, &mut texts);
+                    collect_strings(params, texts);
                 }
             } else {
                 events.push(Event::InputRequested {
@@ -585,10 +596,6 @@ fn on_input_required(tool: &str, result: &Value) -> Outcome {
             }
         }
     }
-    let mut judged = judge_output(tool, result, &texts, "a sampling request");
-    events.append(&mut judged.events);
-    judged.events = events;
-    judged
 }
 
 /// An error response. Its message can reach the model, so it gets the output
