@@ -184,9 +184,11 @@ What the proxy cannot do:
 capabilities, launches the server under a cleared environment, enumerates its
 tools, flags poisoning signals, pins the result and detects changes against it.
 
-The runtime proxy relays, pins and blocks, and it is tested end to end with
-scripted servers on all three platforms. Testing it against the official
-reference servers and a real client is next.
+The runtime proxy relays, pins and blocks. It is tested end to end in both
+protocol eras against a scripted server that misbehaves on purpose, and in CI
+against the official reference servers (everything, filesystem, memory): their
+answers arrive byte for byte as without the proxy, and nothing is blocked.
+Checking it by hand with a real client is next.
 
 ## What it does not do
 
