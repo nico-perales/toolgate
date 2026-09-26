@@ -1,34 +1,14 @@
 //! The offline commands, run the way a person runs them: `review`, `accept`
 //! and `verify-log`.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
+use common::{temp_home, toolgate};
 use serde_json::{Value, json};
 use toolgate::PinnedTool;
 use toolgate::journal::{Journal, Marker};
 use toolgate::policy::Event;
 use toolgate::store::{self, PendingKind, PendingTool, ServerPin};
-
-// A fresh toolgate home per test: no test may touch the real one.
-fn temp_home(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("toolgate-cli-{}-{label}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
-}
-
-// Runs toolgate against `home`; returns its exit code and what it printed.
-fn toolgate(home: &Path, args: &[&str]) -> (Option<i32>, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_toolgate"))
-        .args(args)
-        .env("TOOLGATE_HOME", home)
-        .output()
-        .expect("the toolgate binary runs");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    )
-}
 
 fn pending(kind: PendingKind, definition: Value) -> PendingTool {
     PendingTool {

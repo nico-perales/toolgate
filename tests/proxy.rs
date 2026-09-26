@@ -1,125 +1,17 @@
 //! The proxy as an MCP client sees it: the real binary, a real server process.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
+mod common;
+
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(windows)]
+use std::process::Command;
+#[cfg(windows)]
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
-
-const WAIT: Duration = Duration::from_secs(30);
-
-fn node_available() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-// A fresh toolgate home per test: no test may touch the real one.
-fn temp_home(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("toolgate-e2e-{}-{label}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
-}
-
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
-// The proxy, driven the way an MCP client drives it.
-struct Proxy {
-    child: Child,
-    input: Option<ChildStdin>,
-    lines: Receiver<String>,
-    stderr: Receiver<String>,
-}
-
-impl Proxy {
-    fn start(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_toolgate"))
-            .args(args)
-            .env("TOOLGATE_HOME", home)
-            .envs(env.iter().copied())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the toolgate binary starts");
-        let stdout = child.stdout.take().unwrap();
-        let (line_tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if line_tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        // Read on a thread of its own, so a full pipe can never block the
-        // proxy, and with a timeout later, so a survivor holding it open can
-        // never hang the test.
-        let mut err = child.stderr.take().unwrap();
-        let (err_tx, stderr) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = err.read_to_string(&mut text);
-            let _ = err_tx.send(text);
-        });
-        let input = child.stdin.take();
-        Self {
-            child,
-            input,
-            lines,
-            stderr,
-        }
-    }
-
-    fn send(&mut self, message: &Value) {
-        let input = self.input.as_mut().expect("the input is open");
-        writeln!(input, "{message}").unwrap();
-        input.flush().unwrap();
-    }
-
-    // Sends a request and returns the next message the proxy writes.
-    fn ask(&mut self, message: &Value) -> Value {
-        self.send(message);
-        let line = self.lines.recv_timeout(WAIT).expect("the proxy answers");
-        serde_json::from_str(&line).expect("everything the proxy writes to stdout is JSON")
-    }
-
-    // Closes the proxy's input, as a client does when it quits, and waits for
-    // the proxy to exit. Returns its status, what it wrote to stderr, and the
-    // messages it wrote to stdout that nobody had read yet.
-    fn close(mut self) -> (ExitStatus, String, Vec<String>) {
-        drop(self.input.take());
-        let deadline = Instant::now() + WAIT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() > deadline {
-                let _ = self.child.kill();
-                panic!("the proxy did not exit after its input closed");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        let stderr = self
-            .stderr
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap_or_default();
-        let mut unread = Vec::new();
-        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(5)) {
-            unread.push(line);
-        }
-        (status, stderr, unread)
-    }
-}
+use common::{Client, fixture, node_available, temp_home};
+use serde_json::json;
 
 #[test]
 fn a_first_session_learns_seals_and_blocks_an_unknown_tool() {
@@ -138,24 +30,23 @@ fn a_first_session_learns_seals_and_blocks_an_unknown_tool() {
         // Many MCP servers take their API key as an argument.
         "--token=e2e-secret-4242",
     ];
-    let mut proxy = Proxy::start(&home, &args, &[("TOOLGATE_TEST_INSTRUCTIONS", "Use ping.")]);
+    let mut client = Client::proxy(&home, &args, &[("TOOLGATE_TEST_INSTRUCTIONS", "Use ping.")]);
 
-    let init = proxy.ask(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": { "protocolVersion": "2025-11-25", "capabilities": {},
-                    "clientInfo": { "name": "test", "version": "1" } } }));
+    let params = json!({ "protocolVersion": "2025-11-25", "capabilities": {},
+                         "clientInfo": { "name": "test", "version": "1" } });
+    let init = client.request(1, "initialize", params);
     // The server got the proxy's environment and working directory.
     let cwd = std::env::current_dir().unwrap();
     let expected = format!("Use ping. | cwd={}", cwd.display());
     assert_eq!(init["result"]["instructions"], expected);
-    proxy.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    client.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
 
-    let list = proxy.ask(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+    let list = client.request(2, "tools/list", json!({}));
     assert_eq!(list["result"]["tools"][0]["name"], "ping");
 
     // The complete listing sealed the pin: a name outside it never reaches the
     // server, which would not have answered anyway.
-    let call = proxy.ask(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-        "params": { "name": "ghost", "arguments": {} } }));
+    let call = client.request(3, "tools/call", json!({ "name": "ghost", "arguments": {} }));
     assert_eq!(call["id"], 3);
     assert_eq!(call["result"]["isError"], true);
 
@@ -163,13 +54,17 @@ fn a_first_session_learns_seals_and_blocks_an_unknown_tool() {
     // proxy must not exit while it is on its way. It has to be large to catch
     // that. With the wait removed, a small answer almost always won the race
     // anyway, a 4 MB one was lost 4 times in 6, and a 16 MB one every time.
-    proxy.send(&json!({ "jsonrpc": "2.0", "id": 4, "method": "test/sized",
+    client.send(&json!({ "jsonrpc": "2.0", "id": 4, "method": "test/sized",
         "params": { "bytes": 16_000_000 } }));
-    let (status, stderr, unread) = proxy.close();
-    assert_eq!(status.code(), Some(0), "stderr: {stderr}");
-    assert_eq!(unread.len(), 1, "the last answer was lost");
-    assert!(unread[0].len() > 16_000_000);
-    assert!(stderr.contains("session log"), "stderr: {stderr}");
+    let closed = client.close();
+    assert_eq!(closed.status.code(), Some(0), "stderr: {}", closed.stderr);
+    assert_eq!(closed.unread.len(), 1, "the last answer was lost");
+    assert!(closed.unread[0].len() > 16_000_000);
+    assert!(
+        closed.stderr.contains("session log"),
+        "stderr: {}",
+        closed.stderr
+    );
 
     let pin = toolgate::store::load(&home, "smoke")
         .unwrap()
@@ -207,7 +102,6 @@ fn a_server_that_ignores_eof_is_killed_with_everything_it_started() {
         return;
     }
     let home = temp_home("stubborn");
-    std::fs::create_dir_all(&home).unwrap();
     let pid_file = home.join("server.pid");
     let script = fixture("stubborn.cmd");
     let args = [
@@ -218,11 +112,11 @@ fn a_server_that_ignores_eof_is_killed_with_everything_it_started() {
         script.to_str().unwrap(),
         pid_file.to_str().unwrap(),
     ];
-    let proxy = Proxy::start(&home, &args, &[]);
+    let client = Client::proxy(&home, &args, &[]);
     let pid = wait_for_pid(&pid_file);
 
-    let (status, _, _) = proxy.close();
-    assert_ne!(status.code(), Some(0), "the server had to be killed");
+    let closed = client.close();
+    assert_ne!(closed.status.code(), Some(0), "the server had to be killed");
     assert_gone(&pid);
 }
 
@@ -236,7 +130,6 @@ fn what_a_server_leaves_running_when_it_exits_is_killed() {
         return;
     }
     let home = temp_home("orphan");
-    std::fs::create_dir_all(&home).unwrap();
     let pid_file = home.join("helper.pid");
     let script = fixture("orphaning.cmd");
     let args = [
@@ -247,16 +140,16 @@ fn what_a_server_leaves_running_when_it_exits_is_killed() {
         script.to_str().unwrap(),
         pid_file.to_str().unwrap(),
     ];
-    let proxy = Proxy::start(&home, &args, &[]);
+    let client = Client::proxy(&home, &args, &[]);
     let pid = wait_for_pid(&pid_file);
-    let _ = proxy.close();
+    let _ = client.close();
     assert_gone(&pid);
 }
 
 // The pid a test server wrote to `file`, once it is there.
 #[cfg(windows)]
 fn wait_for_pid(file: &Path) -> String {
-    let deadline = Instant::now() + WAIT;
+    let deadline = Instant::now() + common::WAIT;
     loop {
         let text = std::fs::read_to_string(file).unwrap_or_default();
         if !text.trim().is_empty() {
