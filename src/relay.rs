@@ -85,6 +85,8 @@ struct State {
     session: Session,
     requests: Requests,
     era: Option<&'static str>,
+    // The pin as it is on disk, as far as this session knows.
+    saved: ServerPin,
 }
 
 /// Both directions of one session. One lock covers the policy and the
@@ -98,13 +100,15 @@ pub struct Relay {
 
 impl Relay {
     /// `now` gives the time in Unix milliseconds; `save` persists the pin
-    /// whenever the policy changes it.
+    /// whenever the policy changes what it approves or holds for review.
     pub fn new(session: Session, now: fn() -> u64, save: SavePin) -> Self {
+        let saved = session.pin.clone();
         Self {
             state: Mutex::new(State {
                 session,
                 requests: Requests::default(),
                 era: None,
+                saved,
             }),
             now,
             save,
@@ -118,10 +122,13 @@ impl Relay {
     }
 
     // Saves the pin if the policy changed it. Under the lock, so saves land in
-    // the order the changes happened.
+    // the order the changes happened. Seeing the same pending change again only
+    // moves its timestamps, and that is not worth a write: rewriting the pin on
+    // every listing overwrote an `accept` made while this session ran.
     fn persist(&self, state: &mut State) {
-        if state.session.take_dirty() {
+        if state.session.take_dirty() && !same_but_timestamps(&state.saved, &state.session.pin) {
             (self.save)(&state.session.pin);
+            state.saved = state.session.pin.clone();
         }
     }
 
@@ -213,6 +220,20 @@ impl Relay {
         self.persist(&mut state);
         events
     }
+}
+
+// Whether two pins approve and hold the same things, ignoring when the pending
+// changes were first and last seen.
+fn same_but_timestamps(a: &ServerPin, b: &ServerPin) -> bool {
+    let untimed = |pin: &ServerPin| {
+        let mut pin = pin.clone();
+        if let Some(pending) = &mut pin.pending {
+            pending.first_seen_ms = 0;
+            pending.last_seen_ms = 0;
+        }
+        pin
+    };
+    untimed(a) == untimed(b)
 }
 
 // One message from the client. Returns the proxy's own answer when the message
@@ -1185,5 +1206,23 @@ mod tests {
                 .unwrap()
                 .starts_with("[toolgate]")
         );
+    }
+
+    #[test]
+    fn seeing_the_same_pending_change_again_does_not_rewrite_the_pin() {
+        // Regression: every listing that still stubbed a tool rewrote the pin,
+        // because the change's last-seen time moved. A running session then
+        // overwrote an `accept` made meanwhile, and paid an fsync under the
+        // lock on every listing.
+        let mut first = sealed(&["search"]);
+        let mut changed = tool("search");
+        changed["description"] = json!("Changed.");
+        on_tools_list(&mut first, true, &json!({ "tools": [changed.clone()] }), 5);
+        let (r, saved) = saving(Session::new(first.pin.clone()));
+        r.from_client(&request(json!(2), "tools/list"));
+        let step = r.from_server(&answer(json!(2), json!({ "tools": [changed] })));
+        let description = parse(&step.to_client[0])["result"]["tools"][0]["description"].clone();
+        assert!(description.as_str().unwrap().starts_with("[toolgate]"));
+        assert!(saved.lock().unwrap().is_empty(), "nothing new to save");
     }
 }
