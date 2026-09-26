@@ -147,6 +147,10 @@ pub fn verify(bytes: &[u8]) -> Verdict {
     let mut rest = bytes.split(|b| *b == b'\n').peekable();
     while let Some(line) = rest.next() {
         let last = rest.peek().is_none();
+        // The journal writes LF. A carriage return is what git with autocrlf,
+        // or a Windows editor, adds; it changes no content, so it is not
+        // evidence of tampering.
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.is_empty() && last {
             break; // the newline after the last line
         }
@@ -308,6 +312,17 @@ mod tests {
         let mut log = session(0);
         log.extend_from_slice(b"{}\n");
         assert!(matches!(verify(&log), Verdict::Broken { seq: 2, .. }));
+    }
+
+    #[test]
+    fn a_log_whose_line_endings_became_crlf_is_still_intact() {
+        // Regression: a log copied through git with core.autocrlf, or saved by
+        // a Windows editor, was reported as tampered at its first line.
+        let log = String::from_utf8(session(2)).unwrap().replace('\n', "\r\n");
+        assert!(matches!(
+            verify(log.as_bytes()),
+            Verdict::Intact { lines: 4, .. }
+        ));
     }
 
     #[test]
