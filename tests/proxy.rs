@@ -135,6 +135,8 @@ fn a_first_session_learns_seals_and_blocks_an_unknown_tool() {
         "--",
         "node",
         server.to_str().unwrap(),
+        // Many MCP servers take their API key as an argument.
+        "--token=e2e-secret-4242",
     ];
     let mut proxy = Proxy::start(&home, &args, &[("TOOLGATE_TEST_INSTRUCTIONS", "Use ping.")]);
 
@@ -187,6 +189,12 @@ fn a_first_session_learns_seals_and_blocks_an_unknown_tool() {
     let text = String::from_utf8(log).unwrap();
     assert!(text.contains(r#""era":"legacy""#), "{text}");
     assert!(text.contains(r#""event":"call_blocked""#), "{text}");
+
+    // Regression: the full launch command went to the log and the pin, so an
+    // API key passed as an argument sat in plain text under ~/.toolgate.
+    let pin_file = std::fs::read_to_string(home.join("pins").join("smoke.json")).unwrap();
+    assert!(!text.contains("e2e-secret-4242"), "{text}");
+    assert!(!pin_file.contains("e2e-secret-4242"), "{pin_file}");
 }
 
 #[cfg(windows)]

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::Error;
 use crate::journal::{self, Journal, Marker};
+use crate::lock::sha256_hex;
 use crate::policy::{Event, Session};
 use crate::relay::{Outlet, Relay, SavePin, pump};
 use crate::resolve::resolve_command;
@@ -73,7 +74,8 @@ pub fn run(name: Option<&str>, launch: &[String]) -> Result<u8, Error> {
     let home = store::home()?;
     // Read once, before the server starts: a server that can write files must
     // not get to change the pin this session enforces.
-    let pin = store::load(&home, &key)?.unwrap_or_else(|| ServerPin::new(&key, launch));
+    let shown = public_command(launch);
+    let pin = store::load(&home, &key)?.unwrap_or_else(|| ServerPin::new(&key, &shown));
 
     let started_ms = journal::now_ms();
     let mut child = Command::new(resolve_command(command))
@@ -94,7 +96,7 @@ pub fn run(name: Option<&str>, launch: &[String]) -> Result<u8, Error> {
     };
 
     let shared = Shared {
-        book: Arc::new(Book::open(&home, &key, launch, pin.state)),
+        book: Arc::new(Book::open(&home, &key, &shown, pin.state)),
         relay: Arc::new(Relay::new(Session::new(pin), journal::now_ms, saver(home))),
         client: Arc::new(Outlet::new(std::io::stdout())),
         server: Arc::new(Outlet::new(stdin)),
@@ -146,6 +148,24 @@ pub fn run(name: Option<&str>, launch: &[String]) -> Result<u8, Error> {
         ));
     }
     Ok(exit_code(status))
+}
+
+// The launch command as the log and the pin record it: the program, and only a
+// count and a fingerprint of its arguments. Many MCP servers take their API key
+// as an argument, and neither file is a place for it; the fingerprint still
+// tells two configurations apart.
+fn public_command(launch: &[String]) -> Vec<String> {
+    let Some((program, args)) = launch.split_first() else {
+        return Vec::new();
+    };
+    if args.is_empty() {
+        return vec![program.clone()];
+    }
+    let digest = sha256_hex(args.join("\0").as_bytes());
+    vec![
+        program.clone(),
+        format!("<{} argument(s), sha256 {}>", args.len(), &digest[..16]),
+    ]
 }
 
 // Saves the pin whenever the policy changes it. A pin that cannot be written
@@ -378,5 +398,31 @@ impl Book {
                 journal.head()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_command;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_recorded_command_keeps_the_program_and_hides_the_arguments() {
+        let shown = public_command(&argv(&["npx", "-y", "some-mcp", "--token=ghp_secret"]));
+        assert_eq!(shown[0], "npx");
+        assert!(!shown.join(" ").contains("ghp_secret"), "{shown:?}");
+        assert!(shown[1].starts_with("<3 argument(s), sha256 "), "{shown:?}");
+    }
+
+    #[test]
+    fn two_configurations_still_look_different() {
+        assert_ne!(
+            public_command(&argv(&["npx", "-y", "some-mcp", "--token=a"])),
+            public_command(&argv(&["npx", "-y", "some-mcp", "--token=b"]))
+        );
+        assert_eq!(public_command(&argv(&["node"])), ["node"]);
     }
 }
