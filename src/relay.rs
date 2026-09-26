@@ -1228,4 +1228,173 @@ mod tests {
         assert!(description.as_str().unwrap().starts_with("[toolgate]"));
         assert!(saved.lock().unwrap().is_empty(), "nothing new to save");
     }
+
+    // --- transparency: what the proxy does not handle leaves as it came ---
+
+    // A small deterministic generator (xorshift), so the property test needs no
+    // crate and fails the same way on every run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+        }
+
+        fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[self.below(items.len())]
+        }
+    }
+
+    fn space(rng: &mut Rng) -> &'static str {
+        rng.pick(&["", " ", "  ", "\t"])
+    }
+
+    // An object from ready-made JSON fields, in a random order with random
+    // spacing: exactly what a proxy that parses and re-serialises would change.
+    fn object(rng: &mut Rng, fields: &[(String, String)]) -> String {
+        let mut order: Vec<&(String, String)> = fields.iter().collect();
+        for i in (1..order.len()).rev() {
+            let j = rng.below(i + 1);
+            order.swap(i, j);
+        }
+        let mut parts = Vec::new();
+        for (key, value) in order {
+            let (a, b, c) = (space(rng), space(rng), space(rng));
+            parts.push(format!("{a}{key}{b}:{c}{value}"));
+        }
+        let sep = format!(",{}", space(rng));
+        format!("{{{}{}}}", parts.join(&sep), space(rng))
+    }
+
+    fn field(key: &str, value: String) -> (String, String) {
+        (format!("\"{key}\""), value)
+    }
+
+    // Random JSON text, escapes and all.
+    fn random_json(rng: &mut Rng, depth: u32) -> String {
+        match rng.below(if depth == 0 { 3 } else { 5 }) {
+            0 => {
+                let text = rng.pick(&[
+                    "plain",
+                    "é",
+                    "\\u00e9",
+                    "\\u200b",
+                    "emoji 😀",
+                    "\\ud83d\\ude00",
+                    "with \\\"quotes\\\"",
+                    "",
+                    "tab\\there",
+                ]);
+                format!("\"{text}\"")
+            }
+            1 => rng
+                .pick(&[
+                    "0",
+                    "-0",
+                    "42",
+                    "1.0",
+                    "1e3",
+                    "-2.5E-3",
+                    "12345678901234567890",
+                ])
+                .to_owned(),
+            2 => rng.pick(&["true", "false", "null"]).to_owned(),
+            3 => {
+                let items: Vec<String> = (0..rng.below(3))
+                    .map(|_| random_json(rng, depth - 1))
+                    .collect();
+                let sep = format!("{},{}", space(rng), space(rng));
+                format!("[{}{}]", items.join(&sep), space(rng))
+            }
+            _ => {
+                let mut fields = Vec::new();
+                for _ in 0..rng.below(3) {
+                    let key = rng.pick(&["a", "b", "text", "content", "data", "_meta"]);
+                    let value = random_json(rng, depth - 1);
+                    fields.push(field(key, value));
+                }
+                object(rng, &fields)
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_proxy_does_not_handle_leaves_byte_for_byte() {
+        let mut rng = Rng(0x5eed_cafe_f00d_d00d);
+        let r = relay(learning());
+        for n in 0..500 {
+            let id = if rng.below(2) == 0 {
+                n.to_string()
+            } else {
+                format!("\"r{n}\"")
+            };
+
+            // A client request the policy has no opinion on…
+            let method = rng.pick(&[
+                "ping",
+                "resources/read",
+                "prompts/get",
+                "completion/complete",
+                "resources/list",
+            ]);
+            let fields = [
+                field("jsonrpc", "\"2.0\"".to_owned()),
+                field("id", id.clone()),
+                field("method", format!("\"{method}\"")),
+                field("params", random_json(&mut rng, 2)),
+            ];
+            let request = object(&mut rng, &fields);
+            let step = r.from_client(request.as_bytes());
+            assert_eq!(
+                step.to_server,
+                vec![request.clone().into_bytes()],
+                "{request}"
+            );
+
+            // …something the server says or asks on its own…
+            let (key, value) = if rng.below(2) == 0 {
+                let method = rng.pick(&[
+                    "notifications/message",
+                    "notifications/progress",
+                    "notifications/resources/updated",
+                ]);
+                ("method", format!("\"{method}\""))
+            } else {
+                ("id", format!("{}", 1000 + n))
+            };
+            let mut fields = vec![
+                field("jsonrpc", "\"2.0\"".to_owned()),
+                field(key, value),
+                field("params", random_json(&mut rng, 2)),
+            ];
+            if key == "id" {
+                let asked = rng.pick(&["roots/list", "elicitation/create", "ping"]);
+                fields.push(field("method", format!("\"{asked}\"")));
+            }
+            let aside = object(&mut rng, &fields);
+            let step = r.from_server(aside.as_bytes());
+            assert_eq!(step.to_client, vec![aside.clone().into_bytes()], "{aside}");
+
+            // …and the answer to the request.
+            let fields = [
+                field("jsonrpc", "\"2.0\"".to_owned()),
+                field("id", id),
+                field("result", random_json(&mut rng, 2)),
+            ];
+            let answer = object(&mut rng, &fields);
+            let step = r.from_server(answer.as_bytes());
+            assert_eq!(
+                step.to_client,
+                vec![answer.clone().into_bytes()],
+                "{answer}"
+            );
+        }
+    }
 }
