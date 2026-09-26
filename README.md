@@ -175,7 +175,8 @@ What the proxy cannot do:
   only logged. Nothing deterministic tells them apart from legitimate content.
 - **On Linux and macOS, a server that ignores end-of-file** may leave processes
   it started behind when the proxy stops it: the proxy kills the server's own
-  process, not its whole tree. On Windows it kills the tree.
+  process, not its whole tree. On Windows it kills the tree, and whatever the
+  server left running when it exited.
 
 ## Status
 

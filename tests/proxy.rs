@@ -211,18 +211,56 @@ fn a_server_that_ignores_eof_is_killed_with_everything_it_started() {
         pid_file.to_str().unwrap(),
     ];
     let proxy = Proxy::start(&home, &args, &[]);
-    let deadline = Instant::now() + WAIT;
-    let pid = loop {
-        let text = std::fs::read_to_string(&pid_file).unwrap_or_default();
-        if !text.trim().is_empty() {
-            break text.trim().to_owned();
-        }
-        assert!(Instant::now() < deadline, "the server never started");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let pid = wait_for_pid(&pid_file);
 
     let (status, _, _) = proxy.close();
     assert_ne!(status.code(), Some(0), "the server had to be killed");
+    assert_gone(&pid);
+}
+
+#[cfg(windows)]
+#[test]
+fn what_a_server_leaves_running_when_it_exits_is_killed() {
+    // Regression: the tree was killed only when the server itself had to be.
+    // A server that exited first left its helper running, out of its tree and
+    // out of `taskkill /T`'s reach, holding the client's pipes.
+    if !node_available() {
+        return;
+    }
+    let home = temp_home("orphan");
+    std::fs::create_dir_all(&home).unwrap();
+    let pid_file = home.join("helper.pid");
+    let script = fixture("orphaning.cmd");
+    let args = [
+        "proxy",
+        "--name",
+        "orphan",
+        "--",
+        script.to_str().unwrap(),
+        pid_file.to_str().unwrap(),
+    ];
+    let proxy = Proxy::start(&home, &args, &[]);
+    let pid = wait_for_pid(&pid_file);
+    let _ = proxy.close();
+    assert_gone(&pid);
+}
+
+// The pid a test server wrote to `file`, once it is there.
+#[cfg(windows)]
+fn wait_for_pid(file: &Path) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        if !text.trim().is_empty() {
+            return text.trim().to_owned();
+        }
+        assert!(Instant::now() < deadline, "the server never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(windows)]
+fn assert_gone(pid: &str) {
     let tasks = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
@@ -234,7 +272,7 @@ fn a_server_that_ignores_eof_is_killed_with_everything_it_started() {
         // inherited, and cargo would wait on them forever instead of failing.
         let _ = Command::new("taskkill")
             .args(["/F", "/PID"])
-            .arg(&pid)
+            .arg(pid)
             .output();
     }
     assert!(!survived, "node {pid} survived: {tasks}");

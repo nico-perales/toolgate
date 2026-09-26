@@ -75,6 +75,7 @@ pub fn run(name: Option<&str>, launch: &[String]) -> Result<u8, Error> {
     // not get to change the pin this session enforces.
     let pin = store::load(&home, &key)?.unwrap_or_else(|| ServerPin::new(&key, launch));
 
+    let started_ms = journal::now_ms();
     let mut child = Command::new(resolve_command(command))
         .args(args)
         .stdin(Stdio::piped())
@@ -136,7 +137,7 @@ pub fn run(name: Option<&str>, launch: &[String]) -> Result<u8, Error> {
         drop(guard);
     });
 
-    let (status, panicked) = wait_for_end(&mut child, &finished);
+    let (status, panicked) = wait_for_end(&mut child, &finished, started_ms);
     shared.book.record(&shared.relay.finish());
     shared.book.end(status.and_then(|s| s.code()));
     if panicked {
@@ -160,35 +161,42 @@ fn saver(home: PathBuf) -> SavePin {
     })
 }
 
-// Waits for a side to end the session, then makes sure the server is gone.
-// Returns its exit status, if it gave one, and whether a relay thread panicked.
-fn wait_for_end(child: &mut Child, finished: &Receiver<End>) -> (Option<ExitStatus>, bool) {
-    loop {
+// Waits for a side to end the session, then makes sure the server is gone,
+// and whatever it left running. Returns its exit status, if it gave one, and
+// whether a relay thread panicked.
+fn wait_for_end(
+    child: &mut Child,
+    finished: &Receiver<End>,
+    started_ms: u64,
+) -> (Option<ExitStatus>, bool) {
+    // `drain`: whether what the server wrote last may still be on its way.
+    let (status, panicked, drain_output) = loop {
         match finished.recv_timeout(Duration::from_millis(50)) {
             Ok(End::Panic) => {
                 kill_tree(child);
-                return (child.wait().ok(), true);
+                break (child.wait().ok(), true, false);
             }
-            Ok(End::Client) => {
-                // The client stopped writing, but may still be reading: what
-                // the server answered before it exited must get through.
-                let status = stop(child);
-                drain(finished);
-                return (status, false);
-            }
+            // The client stopped writing, but may still be reading.
+            Ok(End::Client) => break (stop(child), false, true),
             Ok(End::Server) | Err(RecvTimeoutError::Disconnected) => {
-                return (stop(child), false);
+                break (stop(child), false, false);
             }
             Err(RecvTimeoutError::Timeout) => {
                 // A server can exit while a process it started still holds its
                 // output open, and then the relay never sees that output end.
                 if let Ok(Some(status)) = child.try_wait() {
-                    drain(finished);
-                    return (Some(status), false);
+                    break (Some(status), false, true);
                 }
             }
         }
+    };
+    // Before draining: a process the server left behind holds its output open,
+    // and the drain would wait on it for nothing.
+    kill_orphans(child, started_ms);
+    if drain_output {
+        drain(finished);
     }
+    (status, panicked)
 }
 
 // Gives the server side of the relay time to pass on what the server wrote
@@ -229,20 +237,58 @@ fn stop(child: &mut Child) -> Option<ExitStatus> {
 // stdout, which belongs to the MCP client.
 fn kill_tree(child: &mut Child) {
     #[cfg(windows)]
-    {
-        let taskkill = std::env::var_os("SystemRoot").map_or_else(
-            || PathBuf::from("taskkill.exe"),
-            |root| PathBuf::from(root).join("System32").join("taskkill.exe"),
-        );
-        let _ = Command::new(taskkill)
+    quietly(
+        Command::new(system32("taskkill.exe"))
             .args(["/T", "/F", "/PID"])
-            .arg(child.id().to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
+            .arg(child.id().to_string()),
+    );
     let _ = child.kill();
+}
+
+// Kills what the server started and left running when it exited. On Windows
+// those processes are no longer in its tree, so `taskkill /T` cannot reach
+// them, and they still hold the client's pipes, inherited. They are found by
+// parent id, and only among those created after the server started, because
+// Windows reuses the ids of dead processes. The server's own id is not reused
+// meanwhile: `child` still holds its handle.
+#[cfg(windows)]
+fn kill_orphans(child: &Child, started_ms: u64) {
+    let script = format!(
+        "$since = [DateTimeOffset]::FromUnixTimeMilliseconds({started_ms}).LocalDateTime; \
+         Get-CimInstance Win32_Process -Filter 'ParentProcessId={}' | \
+         Where-Object {{ $_.CreationDate -ge $since }} | \
+         ForEach-Object {{ & \"$env:SystemRoot\\System32\\taskkill.exe\" /T /F /PID $_.ProcessId }}",
+        child.id()
+    );
+    quietly(
+        Command::new(system32("WindowsPowerShell\\v1.0\\powershell.exe"))
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script),
+    );
+}
+
+// Elsewhere only the server's own process is killed; see the README.
+#[cfg(not(windows))]
+fn kill_orphans(_child: &Child, _started_ms: u64) {}
+
+// A system tool by absolute path, so nothing earlier in PATH can stand in for it.
+#[cfg(windows)]
+fn system32(tool: &str) -> PathBuf {
+    std::env::var_os("SystemRoot").map_or_else(
+        || PathBuf::from(tool),
+        |root| PathBuf::from(root).join("System32").join(tool),
+    )
+}
+
+// Runs a helper with no input and its output discarded: the proxy's stdout
+// belongs to the MCP client.
+#[cfg(windows)]
+fn quietly(command: &mut Command) {
+    let _ = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 // The server's own exit code when it has one that fits; 1 when it was killed.
